@@ -1,7 +1,7 @@
 use rand::Rng;
 use uuid::Uuid;
 
-use crate::protocol::{EnemyData, EnemyState};
+use crate::protocol::{EnemyData, EnemyModifier, EnemyRank, EnemyState, ALL_MODIFIERS};
 
 /// Names for procedurally generated enemies
 const ENEMY_PREFIXES: &[&str] = &[
@@ -19,9 +19,42 @@ const ENEMY_SUFFIXES: &[&str] = &[
     "Alpha", "Elder", "Brute", "Fiend", "Horror",
 ];
 
+const BOSS_TITLES: &[&str] = &[
+    "the Destroyer", "the Eternal", "the Devourer", "the Corrupted",
+    "the Unstoppable", "the Ancient One", "the Nightmare",
+];
+
 /// Generate a procedural enemy at given position and zone level
 pub fn generate_enemy(x: f64, y: f64, zone_level: u32) -> EnemyData {
     let mut rng = rand::thread_rng();
+
+    // Determine rank
+    let rank_roll: f64 = rng.r#gen();
+    let rank = if rank_roll < 0.02 {
+        EnemyRank::Boss
+    } else if rank_roll < 0.10 {
+        EnemyRank::Elite
+    } else if rank_roll < 0.30 {
+        EnemyRank::Champion
+    } else {
+        EnemyRank::Normal
+    };
+
+    // Determine modifiers based on rank
+    let num_modifiers = match rank {
+        EnemyRank::Normal => 0,
+        EnemyRank::Champion => 1,
+        EnemyRank::Elite => rng.gen_range(2..=3),
+        EnemyRank::Boss => rng.gen_range(3..=4),
+    };
+
+    let mut modifiers = Vec::new();
+    let mut available: Vec<usize> = (0..ALL_MODIFIERS.len()).collect();
+    for _ in 0..num_modifiers {
+        if available.is_empty() { break; }
+        let idx = rng.gen_range(0..available.len());
+        modifiers.push(ALL_MODIFIERS[available.remove(idx)].clone());
+    }
 
     // Random name
     let prefix = if rng.gen_bool(0.3) {
@@ -30,29 +63,74 @@ pub fn generate_enemy(x: f64, y: f64, zone_level: u32) -> EnemyData {
         String::new()
     };
     let base_type = ENEMY_TYPES[rng.gen_range(0..ENEMY_TYPES.len())];
-    let suffix = ENEMY_SUFFIXES[rng.gen_range(0..ENEMY_SUFFIXES.len())];
+    let suffix = match rank {
+        EnemyRank::Boss => BOSS_TITLES[rng.gen_range(0..BOSS_TITLES.len())].to_string(),
+        _ => {
+            let s = ENEMY_SUFFIXES[rng.gen_range(0..ENEMY_SUFFIXES.len())];
+            if s.is_empty() { String::new() } else { s.to_string() }
+        }
+    };
     let name = if suffix.is_empty() {
         format!("{}{}", prefix, base_type)
     } else {
         format!("{}{} {}", prefix, base_type, suffix)
     };
 
-    // Enemy level: zone_level ± random
+    // Enemy level: zone_level ± random, bosses get bonus levels
     let level_offset: i32 = rng.gen_range(-1..=3);
-    let enemy_level = (zone_level as i32 + level_offset).max(1) as u32;
+    let rank_level_bonus = match rank {
+        EnemyRank::Normal => 0,
+        EnemyRank::Champion => 2,
+        EnemyRank::Elite => 4,
+        EnemyRank::Boss => 8,
+    };
+    let enemy_level = (zone_level as i32 + level_offset + rank_level_bonus).max(1) as u32;
 
-    // Stats scale with level
+    // Base stats scale with level
     let level_mult = 1.0 + enemy_level as f64 * 0.15;
+    let rank_mult = match rank {
+        EnemyRank::Normal => 1.0,
+        EnemyRank::Champion => 1.5,
+        EnemyRank::Elite => 2.5,
+        EnemyRank::Boss => 5.0,
+    };
     let base_hp = 50.0;
     let base_atk = 8.0;
     let base_def = 3.0;
 
-    let hp = (base_hp * level_mult * rng.gen_range(0.9..1.1)) as i32;
-    let atk = (base_atk * level_mult * rng.gen_range(0.9..1.1)) as i32;
-    let def = (base_def * level_mult * rng.gen_range(0.9..1.1)) as i32;
+    let mut hp = (base_hp * level_mult * rank_mult * rng.gen_range(0.9..1.1)) as i32;
+    let mut atk = (base_atk * level_mult * rank_mult * rng.gen_range(0.9..1.1)) as i32;
+    let mut def = (base_def * level_mult * rank_mult * rng.gen_range(0.9..1.1)) as i32;
 
-    // XP reward scales with level^1.5
-    let xp_reward = (20.0 * (enemy_level as f64).powf(1.5)) as u64;
+    // Apply modifier stat bonuses
+    for modifier in &modifiers {
+        match modifier {
+            EnemyModifier::Enraged => {
+                atk = (atk as f64 * 1.5) as i32;
+                def = (def as f64 * 0.8) as i32;
+            }
+            EnemyModifier::Armored => {
+                def = (def as f64 * 1.8) as i32;
+            }
+            EnemyModifier::Swift => {
+                // Speed handled in AI, but give slight HP nerf
+                hp = (hp as f64 * 0.85) as i32;
+            }
+            EnemyModifier::Regenerator => {
+                hp = (hp as f64 * 1.3) as i32; // More HP to compensate
+            }
+            _ => {} // Other modifiers are behavioral, handled in combat
+        }
+    }
+
+    // XP reward scales with level and rank
+    let rank_xp_mult = match rank {
+        EnemyRank::Normal => 1.0,
+        EnemyRank::Champion => 2.0,
+        EnemyRank::Elite => 4.0,
+        EnemyRank::Boss => 10.0,
+    };
+    let xp_reward = (20.0 * (enemy_level as f64).powf(1.5) * rank_xp_mult) as u64;
 
     EnemyData {
         id: Uuid::new_v4(),
@@ -68,9 +146,15 @@ pub fn generate_enemy(x: f64, y: f64, zone_level: u32) -> EnemyData {
         patrol_center_x: x,
         patrol_center_y: y,
         patrol_radius: 5.0 + rng.gen_range(0.0..5.0),
-        aggro_range: 6.0 + rng.gen_range(0.0..4.0),
+        aggro_range: match rank {
+            EnemyRank::Boss => 12.0 + rng.gen_range(0.0..4.0),
+            EnemyRank::Elite => 9.0 + rng.gen_range(0.0..3.0),
+            _ => 6.0 + rng.gen_range(0.0..4.0),
+        },
         state: EnemyState::Idle,
         target_player: None,
+        rank,
+        modifiers,
     }
 }
 

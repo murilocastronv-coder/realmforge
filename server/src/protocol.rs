@@ -255,6 +255,40 @@ impl PlayerData {
 }
 
 // ─── Enemy Data ──────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum EnemyRank {
+    Normal,    // No modifiers (70%)
+    Champion,  // 1 modifier (20%)
+    Elite,     // 2-3 modifiers (8%)
+    Boss,      // Unique modifiers + extra loot (2%)
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum EnemyModifier {
+    Enraged,     // +50% ATK, +30% SPD, -20% DEF
+    Armored,     // +80% DEF, -20% SPD
+    Vampiric,    // Heals 15% of damage dealt
+    Explosive,   // AOE damage on death
+    Summoner,    // Spawns minions (unused for now)
+    Regenerator, // +5% HP/s
+    Reflector,   // 20% damage reflected
+    Swift,       // +60% SPD
+    Thorns,      // Deals flat damage back
+}
+
+pub const ALL_MODIFIERS: &[EnemyModifier] = &[
+    EnemyModifier::Enraged,
+    EnemyModifier::Armored,
+    EnemyModifier::Vampiric,
+    EnemyModifier::Explosive,
+    EnemyModifier::Summoner,
+    EnemyModifier::Regenerator,
+    EnemyModifier::Reflector,
+    EnemyModifier::Swift,
+    EnemyModifier::Thorns,
+];
+
 #[derive(Debug, Clone)]
 pub struct EnemyData {
     pub id: Uuid,
@@ -273,6 +307,8 @@ pub struct EnemyData {
     pub aggro_range: f64,
     pub state: EnemyState,
     pub target_player: Option<Uuid>,
+    pub rank: EnemyRank,
+    pub modifiers: Vec<EnemyModifier>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -286,6 +322,12 @@ pub enum EnemyState {
 
 impl EnemyData {
     pub fn to_entity_state(&self) -> EntityState {
+        let rank_prefix = match self.rank {
+            EnemyRank::Normal => String::new(),
+            EnemyRank::Champion => "⭐ ".to_string(),
+            EnemyRank::Elite => "💎 ".to_string(),
+            EnemyRank::Boss => "👑 ".to_string(),
+        };
         EntityState {
             id: self.id.to_string(),
             entity_type: "enemy".to_string(),
@@ -294,7 +336,7 @@ impl EnemyData {
             hp: Some(self.hp),
             max_hp: Some(self.max_hp),
             level: Some(self.level),
-            name: Some(self.name.clone()),
+            name: Some(format!("{}{}", rank_prefix, self.name)),
             direction: None,
         }
     }

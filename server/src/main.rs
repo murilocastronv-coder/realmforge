@@ -483,12 +483,25 @@ fn handle_attack(state: &Arc<AppState>, attacker_id: Uuid, target_id: Uuid) {
             let ey = enemy.y;
             let enemy_name = enemy.name.clone();
             let enemy_level = enemy.level;
+            let enemy_rank = enemy.rank.clone();
             let zone_level = state.world.get_zone_level(ex, ey);
             drop(enemy);
 
-            // Generate loot
-            let loot = generate_loot(zone_level, enemy_level, lck);
-            let gold = enemy_gold_reward(zone_level, enemy_level);
+            // Generate loot — ranked enemies drop more
+            let extra_luck = match &enemy_rank {
+                protocol::EnemyRank::Champion => 50,
+                protocol::EnemyRank::Elite => 150,
+                protocol::EnemyRank::Boss => 500,
+                _ => 0,
+            };
+            let loot = generate_loot(zone_level, enemy_level, lck + extra_luck);
+            let gold_mult = match &enemy_rank {
+                protocol::EnemyRank::Champion => 2.0,
+                protocol::EnemyRank::Elite => 5.0,
+                protocol::EnemyRank::Boss => 15.0,
+                _ => 1.0,
+            };
+            let gold = (enemy_gold_reward(zone_level, enemy_level) as f64 * gold_mult) as u64;
             let tick = state.tick_count.load(std::sync::atomic::Ordering::Relaxed) as f64;
 
             // Drop items on ground
