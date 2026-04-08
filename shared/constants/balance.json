@@ -1,0 +1,64 @@
+{
+  "level_system": {
+    "base_xp": 100,
+    "xp_exponent": 2.5,
+    "stat_gains": {
+      "hp": 10.0,
+      "mp": 5.0,
+      "atk": 5.0,
+      "def": 3.0,
+      "spd": 2.0,
+      "lck": 1.0
+    },
+    "diminishing_threshold": 50,
+    "diminishing_rate": 0.005,
+    "post_threshold_decay": 0.6
+  },
+  "combat": {
+    "base_crit_chance": 0.05,
+    "crit_chance_per_lck": 0.001,
+    "crit_multiplier_base": 1.5,
+    "crit_multiplier_per_lck": 0.005,
+    "damage_variance": 0.1,
+    "attack_range": 1.5,
+    "attack_cooldown_ms": 800
+  },
+  "pvp": {
+    "inventory_drop_rate": 0.3,
+    "gold_drop_rate": 0.1,
+    "protection_timer_seconds": 30,
+    "newbie_protection_level": 10
+  },
+  "enemies": {
+    "base_hp": 50,
+    "base_atk": 8,
+    "base_def": 3,
+    "level_scaling": 0.15,
+    "xp_base": 20,
+    "xp_level_exponent": 1.5,
+    "spawn_density_per_chunk": [2, 5],
+    "respawn_check_interval_ticks": 200,
+    "min_enemy_count": 150
+  },
+  "world": {
+    "chunk_size": 32,
+    "view_distance_chunks": 3,
+    "town_radius": 8,
+    "zone_radius": 20
+  },
+  "server": {
+    "tick_rate": 20,
+    "entity_broadcast_interval": 2,
+    "ai_update_interval": 3,
+    "view_range": 50,
+    "port": 8080
+  },
+  "rarities": [
+    { "id": 0, "name": "Common", "color": "#ffffff", "drop_rate": 0.60, "stat_mult": 1.0 },
+    { "id": 1, "name": "Uncommon", "color": "#00ff00", "drop_rate": 0.25, "stat_mult": 1.3 },
+    { "id": 2, "name": "Rare", "color": "#0088ff", "drop_rate": 0.10, "stat_mult": 1.7 },
+    { "id": 3, "name": "Epic", "color": "#aa00ff", "drop_rate": 0.04, "stat_mult": 2.2 },
+    { "id": 4, "name": "Legendary", "color": "#ff8800", "drop_rate": 0.009, "stat_mult": 3.0 },
+    { "id": 5, "name": "Mythic", "color": "#ff0000", "drop_rate": 0.001, "stat_mult": 5.0 }
+  ]
+}
