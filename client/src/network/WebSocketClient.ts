@@ -31,6 +31,7 @@ export enum MessageType {
   Respawn = 62,
   GroundItems = 63,
   BankUpdate = 64,
+  XpOrbPickup = 65,
 }
 
 export interface GameMessage {

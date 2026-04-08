@@ -34,6 +34,7 @@ pub const MSG_DEATH: u8 = 61;
 pub const MSG_RESPAWN: u8 = 62;
 pub const MSG_GROUND_ITEMS: u8 = 63;
 pub const MSG_BANK_UPDATE: u8 = 64;
+pub const MSG_XP_ORB_PICKUP: u8 = 65;
 
 // ─── Message Envelope ────────────────────────────────────────
 #[derive(Debug, Serialize, Deserialize, Clone)]

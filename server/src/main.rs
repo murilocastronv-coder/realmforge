@@ -1333,6 +1333,148 @@ fn broadcast_ground_items(state: &Arc<AppState>, x: f64, y: f64) {
     state.send_to_all_near(x, y, 30.0, &msg);
 }
 
+// ─── XP Orb System ──────────────────────────────────────────
+
+/// Spawn XP orbs near players periodically (agar.io style ground XP).
+/// Each orb is a special GroundItem with template_id "xp_orb_*".
+fn spawn_xp_orbs(state: &Arc<AppState>) {
+    let mut rng = rand::thread_rng();
+    let player_positions: Vec<(f64, f64)> = state.players.iter()
+        .filter(|p| !p.dead)
+        .map(|p| (p.x, p.y))
+        .collect();
+
+    if player_positions.is_empty() { return; }
+
+    // Count existing XP orbs
+    let xp_orb_count = state.ground_items.iter()
+        .filter(|gi| gi.item.template_id.starts_with("xp_orb"))
+        .count();
+
+    // Cap total XP orbs in the world
+    let max_orbs = (player_positions.len() * 30).min(500);
+    if xp_orb_count >= max_orbs { return; }
+
+    let orbs_to_spawn = ((max_orbs - xp_orb_count) as usize).min(player_positions.len() * 5);
+
+    for _ in 0..orbs_to_spawn {
+        // Pick a random player and spawn orb within 8-20 tiles of them
+        let (px, py) = player_positions[rng.gen_range(0..player_positions.len())];
+        let angle: f64 = rng.gen_range(0.0..std::f64::consts::TAU);
+        let dist: f64 = rng.gen_range(4.0..18.0);
+        let ox = px + angle.cos() * dist;
+        let oy = py + angle.sin() * dist;
+
+        // Tier: 70% small (green), 22% medium (blue), 8% large (purple)
+        let roll: f64 = rng.r#gen::<f64>();
+        let (tier_name, tier_rarity, xp_amount) = if roll < 0.70 {
+            ("XP Orb", 1u8, rng.gen_range(5..15) as u32)       // green
+        } else if roll < 0.92 {
+            ("XP Orb+", 2u8, rng.gen_range(20..50) as u32)     // blue
+        } else {
+            ("XP Orb++", 3u8, rng.gen_range(60..150) as u32)   // purple
+        };
+
+        let mut stats = HashMap::new();
+        stats.insert("XP".to_string(), xp_amount as i32);
+
+        let item = Item {
+            id: Uuid::new_v4().to_string(),
+            template_id: format!("xp_orb_{}", xp_amount),
+            name: tier_name.to_string(),
+            rarity: tier_rarity,
+            item_type: ItemType::Misc,
+            slot: None,
+            stackable: false,
+            quantity: 1,
+            level: 0,
+            stats,
+            description: format!("+{} XP", xp_amount),
+            affixes: vec![],
+        };
+
+        let ground_item = GroundItem {
+            id: Uuid::new_v4(),
+            item,
+            x: ox,
+            y: oy,
+            owner_id: None,
+            drop_time: 0.0,
+            protection_duration: 0.0,
+        };
+        state.ground_items.insert(ground_item.id, ground_item);
+    }
+}
+
+/// Auto-pickup XP orbs within 1.5 tiles of a player during movement.
+/// Returns list of (player_id, xp_gained, orb_x, orb_y) to send notifications.
+fn pickup_xp_orbs(state: &Arc<AppState>) {
+    let player_data: Vec<(Uuid, f64, f64, bool)> = state.players.iter()
+        .map(|p| (p.id, p.x, p.y, p.dead))
+        .collect();
+
+    for (player_id, px, py, dead) in &player_data {
+        if *dead { continue; }
+
+        // Find XP orbs within pickup range
+        let nearby_orbs: Vec<Uuid> = state.ground_items.iter()
+            .filter(|gi| {
+                gi.item.template_id.starts_with("xp_orb") &&
+                ((gi.x - px).powi(2) + (gi.y - py).powi(2)).sqrt() < 1.5
+            })
+            .map(|gi| gi.id)
+            .collect();
+
+        for orb_id in nearby_orbs {
+            if let Some((_, orb)) = state.ground_items.remove(&orb_id) {
+                let xp_amount = orb.item.stats.get("XP").copied().unwrap_or(10) as u64;
+
+                if let Some(mut player) = state.players.get_mut(player_id) {
+                    player.xp += xp_amount;
+
+                    // Check level up
+                    let xp_needed = player.xp_to_next_level();
+                    if player.xp >= xp_needed {
+                        player.level += 1;
+                        player.xp -= xp_needed;
+                        player.pvp_protection = player.level < 10;
+
+                        let dim_factor = if player.level <= 50 {
+                            1.0 - player.level as f64 * 0.005
+                        } else {
+                            0.75 * (50.0 / player.level as f64).powf(0.6)
+                        };
+
+                        player.max_hp += (10.0 * dim_factor) as i32;
+                        player.hp = player.max_hp;
+                        player.max_mp += (5.0 * dim_factor) as i32;
+                        player.mp = player.max_mp;
+                        player.atk += (5.0 * dim_factor) as i32;
+                        player.def += (3.0 * dim_factor) as i32;
+                        player.spd += (2.0 * dim_factor) as i32;
+                        player.lck += (1.0 * dim_factor) as i32;
+
+                        let level_msg = json!({
+                            "type": MSG_LEVEL_UP,
+                            "payload": { "level": player.level }
+                        }).to_string();
+                        state.send_to(player_id, &level_msg);
+                    }
+
+                    send_stats_update(state, &player);
+                }
+
+                // Notify client with floating XP text
+                let pickup_msg = json!({
+                    "type": MSG_XP_ORB_PICKUP,
+                    "payload": { "xp": xp_amount, "x": orb.x, "y": orb.y }
+                }).to_string();
+                state.send_to(player_id, &pickup_msg);
+            }
+        }
+    }
+}
+
 // ─── Game Loop ───────────────────────────────────────────────
 
 async fn game_loop(state: Arc<AppState>) {
@@ -1344,6 +1486,9 @@ async fn game_loop(state: Arc<AppState>) {
 
         // 1. Move players toward their targets
         update_player_movement(&state);
+
+        // 1b. Auto-pickup XP orbs near players
+        pickup_xp_orbs(&state);
 
         // 2. Handle dead player respawns
         update_dead_players(&state);
@@ -1362,6 +1507,11 @@ async fn game_loop(state: Arc<AppState>) {
         // 5. Respawn enemies (every 200 ticks = 10 seconds)
         if tick % 200 == 0 {
             respawn_enemies(&state);
+        }
+
+        // 5b. Spawn XP orbs near players (every 60 ticks = 3 seconds)
+        if tick % 60 == 0 {
+            spawn_xp_orbs(&state);
         }
 
         // 6. Clean up old ground items (every 100 ticks = 5 seconds)

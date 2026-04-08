@@ -221,6 +221,27 @@ export class BootScene extends Phaser.Scene {
     gfx.fillCircle(9, 12, 2);
     gfx.generateTexture('item_drop', 24, 24);
     gfx.destroy();
+
+    // XP orb textures (3 tiers: green, blue, purple)
+    const orbColors = [
+      { key: 'xp_orb_green', fill: 0x44ff66, glow: 0x22cc44 },
+      { key: 'xp_orb_blue', fill: 0x44aaff, glow: 0x2288dd },
+      { key: 'xp_orb_purple', fill: 0xcc66ff, glow: 0x9944cc },
+    ];
+    for (const orb of orbColors) {
+      const og = this.add.graphics();
+      // Outer glow
+      og.fillStyle(orb.glow, 0.3);
+      og.fillCircle(10, 10, 9);
+      // Core
+      og.fillStyle(orb.fill, 0.9);
+      og.fillCircle(10, 10, 5);
+      // Inner shine
+      og.fillStyle(0xffffff, 0.6);
+      og.fillCircle(8, 8, 2);
+      og.generateTexture(orb.key, 20, 20);
+      og.destroy();
+    }
   }
 
   private drawIsoDiamond(gfx: Phaser.GameObjects.Graphics, fillColor: number, strokeColor: number): void {

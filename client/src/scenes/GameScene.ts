@@ -204,9 +204,8 @@ export class GameScene extends Phaser.Scene {
     this.input.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
       if (pointer.rightButtonDown() || this.isDead || this.tutorial?.isActive()) return;
 
-      // Don't process world clicks if pointer hit a UI element (depth >= 2000)
-      const hitObjects = this.input.hitTestPointer(pointer);
-      if (hitObjects.some((obj: Phaser.GameObjects.GameObject) => (obj as any).depth >= 2000)) return;
+      // Don't process world clicks if pointer is over a UI panel
+      if (this.isPointerOverUI(pointer)) return;
 
       const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
       const gridPos = screenToWorld(worldPoint.x, worldPoint.y);
@@ -230,6 +229,10 @@ export class GameScene extends Phaser.Scene {
     });
 
     this.input.on('pointermove', (pointer: Phaser.Input.Pointer) => {
+      if (this.isPointerOverUI(pointer)) {
+        this.cursorHighlight.clear();
+        return;
+      }
       const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
       const gridPos = screenToWorld(worldPoint.x, worldPoint.y);
       this.drawCursorHighlight(Math.round(gridPos.x), Math.round(gridPos.y));
@@ -580,6 +583,26 @@ export class GameScene extends Phaser.Scene {
       }
     });
 
+    // XP Orb pickup — floating "+XP" text
+    this.network.on(MessageType.XpOrbPickup, (msg) => {
+      try {
+        const { xp, x, y } = msg.payload as { xp: number; x: number; y: number };
+        const pos = worldToScreen(x, y);
+        const color = xp >= 60 ? '#cc66ff' : xp >= 20 ? '#44aaff' : '#44ff66';
+        const floatText = this.add.text(pos.x, pos.y - 10, `+${xp} XP`, {
+          fontSize: '12px', color, stroke: '#000000', strokeThickness: 3,
+          fontStyle: 'bold',
+        }).setOrigin(0.5).setDepth(9000);
+        this.tweens.add({
+          targets: floatText, y: pos.y - 50, alpha: 0,
+          duration: 1200, ease: 'Power2',
+          onComplete: () => floatText.destroy(),
+        });
+      } catch (e) {
+        console.error('[GameScene] XpOrbPickup error:', e);
+      }
+    });
+
     // NOTE: ChatMessage is handled directly by ChatBox (see ChatBox constructor).
     // No duplicate handler here to avoid double messages.
   }
@@ -646,6 +669,28 @@ export class GameScene extends Phaser.Scene {
       if (dx < 24 && dy < 36) return id;
     }
     return null;
+  }
+
+  /** Screen-space check: is pointer over any visible UI panel? */
+  private isPointerOverUI(pointer: Phaser.Input.Pointer): boolean {
+    const sx = pointer.x;
+    const sy = pointer.y;
+    // Define bounds for each panel: [x, y, w, h, visibleFn]
+    const panels: [number, number, number, number, () => boolean][] = [
+      [910, 60, 348, 255, () => this.inventoryUI.isVisible()],
+      [730, 60, 165, 280, () => this.equipmentUI.isVisible()],
+      [440, 100, 373, 341, () => this.bankUI.isVisible()],
+      [490, 100, 300, 260, () => this.craftingUI.isVisible()],
+      [440, 80, 400, 300, () => this.marketplaceUI.isVisible()],
+      [10, 476, 360, 224, () => true], // chatBox always visible
+      [10, 28, 160, 55, () => true],   // statsUI always visible
+    ];
+    for (const [px, py, pw, ph, vis] of panels) {
+      if (vis() && sx >= px && sx <= px + pw && sy >= py && sy <= py + ph) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private handleEntityClick(entityId: string): void {
@@ -726,24 +771,45 @@ export class GameScene extends Phaser.Scene {
     for (const item of items) {
       if (!this.groundItems.has(item.id)) {
         const pos = worldToScreen(item.x, item.y);
-        const color = this.RARITY_COLORS[item.rarity] ?? 0xffffff;
+        const isXpOrb = item.name.startsWith('XP Orb');
 
-        const sprite = this.add.sprite(pos.x, pos.y, 'item_drop')
-          .setDepth(pos.y - 5000)
-          .setTint(color)
-          .setInteractive({ useHandCursor: true });
+        if (isXpOrb) {
+          // XP orb — use glowing orb texture, no name label, floating bob animation
+          const orbKey = item.rarity >= 3 ? 'xp_orb_purple' : item.rarity >= 2 ? 'xp_orb_blue' : 'xp_orb_green';
+          const sprite = this.add.sprite(pos.x, pos.y, orbKey)
+            .setDepth(pos.y - 5000)
+            .setAlpha(0.85);
 
-        const text = this.add.text(pos.x, pos.y - 20, item.name, {
-          fontSize: '8px', color: `#${color.toString(16).padStart(6, '0')}`,
-          stroke: '#000000', strokeThickness: 2,
-        }).setOrigin(0.5).setDepth(pos.y - 4999);
+          // Gentle floating bob animation
+          this.tweens.add({
+            targets: sprite, y: pos.y - 4, duration: 800 + Math.random() * 400,
+            yoyo: true, repeat: -1, ease: 'Sine.easeInOut',
+          });
 
-        // Click to pick up
-        sprite.on('pointerdown', () => {
-          this.network.send(MessageType.PickupItem, { itemId: item.id });
-        });
+          // Empty text placeholder (to keep the map structure consistent)
+          const text = this.add.text(0, 0, '').setVisible(false);
+          this.groundItems.set(item.id, { sprite, text });
+        } else {
+          // Normal item drop
+          const color = this.RARITY_COLORS[item.rarity] ?? 0xffffff;
 
-        this.groundItems.set(item.id, { sprite, text });
+          const sprite = this.add.sprite(pos.x, pos.y, 'item_drop')
+            .setDepth(pos.y - 5000)
+            .setTint(color)
+            .setInteractive({ useHandCursor: true });
+
+          const text = this.add.text(pos.x, pos.y - 20, item.name, {
+            fontSize: '8px', color: `#${color.toString(16).padStart(6, '0')}`,
+            stroke: '#000000', strokeThickness: 2,
+          }).setOrigin(0.5).setDepth(pos.y - 4999);
+
+          // Click to pick up
+          sprite.on('pointerdown', () => {
+            this.network.send(MessageType.PickupItem, { itemId: item.id });
+          });
+
+          this.groundItems.set(item.id, { sprite, text });
+        }
       }
     }
   }
