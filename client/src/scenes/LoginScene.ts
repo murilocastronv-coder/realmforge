@@ -85,7 +85,11 @@ export class LoginScene extends Phaser.Scene {
       fontSize: '9px', color: '#334455',
     }).setOrigin(0.5);
 
+    let authInProgress = false;
+
     const doAuth = (isRegister: boolean) => {
+      if (authInProgress) return;
+
       const username = usernameInput.value.trim();
       const password = passwordInput.value.trim();
 
@@ -102,6 +106,7 @@ export class LoginScene extends Phaser.Scene {
 
       statusText.setText('⟳ Connecting...');
       statusText.setColor('#ffdd44');
+      authInProgress = true;
 
       if (!this.network.connected) {
         this.network.connect();
@@ -139,6 +144,7 @@ export class LoginScene extends Phaser.Scene {
       } else {
         statusText.setText(result.error || 'Authentication failed');
         statusText.setColor('#ff4444');
+        authInProgress = false;
       }
     };
     this.network.on(MessageType.AuthResult, this.authHandler);

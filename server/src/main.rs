@@ -67,6 +67,8 @@ struct AppState {
     senders: DashMap<Uuid, mpsc::UnboundedSender<String>>,
     /// Registered accounts (username -> password hash) - in-memory for now
     accounts: DashMap<String, String>,
+    /// Saved player data for offline players (username -> player data)
+    saved_players: DashMap<String, PlayerData>,
     /// World generator
     world: WorldGenerator,
     /// Active enemies
@@ -92,6 +94,7 @@ impl AppState {
             players: DashMap::new(),
             senders: DashMap::new(),
             accounts: DashMap::new(),
+            saved_players: DashMap::new(),
             world: WorldGenerator::new(42),
             enemies: DashMap::new(),
             chunk_cache: DashMap::new(),
@@ -197,9 +200,9 @@ async fn main() {
 }
 
 fn spawn_initial_enemies(state: &Arc<AppState>) {
-    // Spawn enemies in chunks around the center
-    for cx in -3..=3_i32 {
-        for cy in -3..=3_i32 {
+    // Spawn enemies in chunks around the center (expanded to -6..=6)
+    for cx in -6..=6_i32 {
+        for cy in -6..=6_i32 {
             let spawns = state.world.get_enemy_spawns(cx, cy);
             for (x, y, zone_level) in spawns {
                 let enemy = generate_enemy(x, y, zone_level);
@@ -260,10 +263,12 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
         }
     }
 
-    // Cleanup on disconnect
+    // Cleanup on disconnect — save player data before removing
     let pid = *player_id.lock().await;
     if let Some(id) = pid {
-        state.players.remove(&id);
+        if let Some((_, player_data)) = state.players.remove(&id) {
+            state.saved_players.insert(player_data.username.clone(), player_data);
+        }
         state.senders.remove(&id);
 
         // Notify others
@@ -273,7 +278,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
         })
         .to_string();
         state.broadcast(&leave_msg);
-        info!("Player {} disconnected", id);
+        info!("Player {} disconnected (data saved)", id);
     }
 
     send_task.abort();
@@ -368,6 +373,26 @@ async fn handle_message(
                 handle_use_item(state, pid, &msg.payload);
             }
         }
+        MSG_REQUEST_CHUNK => {
+            if let Some(_pid) = player_id {
+                if let (Some(cx), Some(cy)) = (
+                    msg.payload.get("chunkX").and_then(|v| v.as_i64()),
+                    msg.payload.get("chunkY").and_then(|v| v.as_i64()),
+                ) {
+                    let chunk = get_or_generate_chunk(state, cx as i32, cy as i32);
+                    let chunk_msg = json!({
+                        "type": MSG_CHUNK_DATA,
+                        "payload": {
+                            "chunkX": chunk.chunk_x,
+                            "chunkY": chunk.chunk_y,
+                            "tiles": chunk.tiles,
+                            "biome": chunk.biome,
+                        }
+                    }).to_string();
+                    let _ = sender.send(chunk_msg);
+                }
+            }
+        }
         _ => {
             warn!("Unknown message type: {}", msg.msg_type);
         }
@@ -432,8 +457,43 @@ async fn handle_auth(
         }
     }
 
-    // Create player
-    let player = PlayerData::new(auth.username.clone());
+    // Kick existing session for same username (prevent duplicate logins)
+    let existing_pid: Option<Uuid> = state.players.iter()
+        .find(|entry| entry.value().username == auth.username)
+        .map(|entry| *entry.key());
+    if let Some(old_pid) = existing_pid {
+        // Save their data before removing
+        if let Some((_, old_player)) = state.players.remove(&old_pid) {
+            state.saved_players.insert(auth.username.clone(), old_player);
+        }
+        state.senders.remove(&old_pid);
+        let kick_msg = json!({
+            "type": MSG_PLAYER_LEFT,
+            "payload": { "id": old_pid.to_string() }
+        }).to_string();
+        state.broadcast(&kick_msg);
+    }
+
+    // Restore saved character or create new one
+    let player = if let Some((_, mut saved)) = state.saved_players.remove(&auth.username) {
+        // Restore saved character with a new session ID
+        saved.id = Uuid::new_v4();
+        saved.dead = false;
+        saved.respawn_timer = 0.0;
+        // Respawn at town if they were dead
+        if saved.hp <= 0 {
+            saved.hp = saved.max_hp;
+            saved.x = 0.0;
+            saved.y = 0.0;
+            saved.target_x = 0.0;
+            saved.target_y = 0.0;
+        }
+        info!("Restored saved character for: {}", auth.username);
+        saved
+    } else {
+        info!("New character created for: {}", auth.username);
+        PlayerData::new(auth.username.clone())
+    };
     let pid = player.id;
 
     state.players.insert(pid, player);
@@ -449,9 +509,16 @@ async fn handle_auth(
     let msg = json!({ "type": MSG_AUTH_RESULT, "payload": result }).to_string();
     let _ = sender.send(msg);
 
-    // Send initial chunks
-    for cx in -2..=2_i32 {
-        for cy in -2..=2_i32 {
+    // Send initial chunks around player's actual position (not always origin)
+    let player_ref = state.players.get(&pid).unwrap();
+    let pcx = (player_ref.x / 32.0).floor() as i32;
+    let pcy = (player_ref.y / 32.0).floor() as i32;
+    let px = player_ref.x;
+    let py = player_ref.y;
+    drop(player_ref);
+
+    for cx in (pcx - 2)..=(pcx + 2) {
+        for cy in (pcy - 2)..=(pcy + 2) {
             let chunk = get_or_generate_chunk(state, cx, cy);
             let chunk_msg = json!({ "type": MSG_CHUNK_DATA, "payload": chunk }).to_string();
             let _ = sender.send(chunk_msg);
@@ -476,6 +543,29 @@ async fn handle_auth(
     // Send initial state to player
     send_stats_update_by_id(state, &pid);
     send_inventory_update(state, &pid);
+    send_bank_update(state, &pid);
+
+    // Send nearby ground items
+    let items: Vec<serde_json::Value> = state.ground_items.iter()
+        .filter(|gi| {
+            let dist_sq = (gi.x - px).powi(2) + (gi.y - py).powi(2);
+            dist_sq < 900.0
+        })
+        .map(|gi| json!({
+            "id": gi.id.to_string(),
+            "name": gi.item.name,
+            "rarity": gi.item.rarity,
+            "x": gi.x,
+            "y": gi.y,
+        }))
+        .collect();
+    if !items.is_empty() {
+        let gi_msg = json!({
+            "type": MSG_GROUND_ITEMS,
+            "payload": { "items": items }
+        }).to_string();
+        state.send_to(&pid, &gi_msg);
+    }
 }
 
 fn get_or_generate_chunk(state: &Arc<AppState>, chunk_x: i32, chunk_y: i32) -> ChunkData {
@@ -997,6 +1087,42 @@ fn handle_use_item(state: &Arc<AppState>, player_id: Uuid, payload: &serde_json:
             }).to_string();
             state.send_to(&player_id, &msg);
         }
+        "use" => {
+            // Use a consumable item from inventory
+            let slot_index = match payload.get("slotIndex").and_then(|v| v.as_u64()) {
+                Some(idx) => idx as usize,
+                None => return,
+            };
+            if let Some(mut player) = state.players.get_mut(&player_id) {
+                if slot_index >= player.inventory.len() { return; }
+                if let Some(ref item) = player.inventory[slot_index] {
+                    if item.item_type == ItemType::Consumable {
+                        // Apply consumable effect
+                        let heal = item.stats.get("HP").copied().unwrap_or(0);
+                        let item_name = item.name.clone();
+                        player.inventory[slot_index] = None;
+                        if heal > 0 {
+                            player.hp = (player.hp + heal).min(player.max_hp);
+                        }
+                        drop(player);
+                        // Send feedback
+                        let msg = json!({
+                            "type": MSG_CHAT_MESSAGE,
+                            "payload": { "sender": "System", "text": format!("Used {}. Healed {} HP.", item_name, heal), "channel": "system" }
+                        }).to_string();
+                        state.send_to(&player_id, &msg);
+                        send_inventory_update(state, &player_id);
+                        send_stats_update_by_id(state, &player_id);
+                    } else {
+                        let msg = json!({
+                            "type": MSG_CHAT_MESSAGE,
+                            "payload": { "sender": "System", "text": "This item cannot be used.", "channel": "system" }
+                        }).to_string();
+                        state.send_to(&player_id, &msg);
+                    }
+                }
+            }
+        }
         _ => {
             warn!("Unknown UseItem action: {}", action);
         }
@@ -1243,6 +1369,11 @@ async fn game_loop(state: Arc<AppState>) {
             cleanup_ground_items(&state, tick as f64);
         }
 
+        // 7. Sync ground items to nearby players (every 10 ticks = 0.5 seconds)
+        if tick % 10 == 0 {
+            sync_ground_items_to_players(&state);
+        }
+
         let elapsed = tick_start.elapsed();
         if elapsed < tick_duration {
             tokio::time::sleep(tick_duration - elapsed).await;
@@ -1372,6 +1503,36 @@ fn cleanup_ground_items(state: &Arc<AppState>, current_tick: f64) {
     }
 }
 
+fn sync_ground_items_to_players(state: &Arc<AppState>) {
+    for entry in state.players.iter() {
+        let player = entry.value();
+        if player.dead { continue; }
+        let px = player.x;
+        let py = player.y;
+        let pid = player.id;
+
+        let items: Vec<serde_json::Value> = state.ground_items.iter()
+            .filter(|gi| {
+                let dist_sq = (gi.x - px).powi(2) + (gi.y - py).powi(2);
+                dist_sq < 900.0 // 30.0^2
+            })
+            .map(|gi| json!({
+                "id": gi.id.to_string(),
+                "name": gi.item.name,
+                "rarity": gi.item.rarity,
+                "x": gi.x,
+                "y": gi.y,
+            }))
+            .collect();
+
+        let msg = json!({
+            "type": MSG_GROUND_ITEMS,
+            "payload": { "items": items }
+        }).to_string();
+        state.send_to(&pid, &msg);
+    }
+}
+
 fn update_enemies(state: &Arc<AppState>) {
     let players: Vec<(Uuid, f64, f64)> = state
         .players
@@ -1440,15 +1601,32 @@ fn broadcast_entity_updates(state: &Arc<AppState>) {
 
 fn respawn_enemies(state: &Arc<AppState>) {
     let current_count = state.enemies.len();
-    let target_count = 150; // Maintain minimum enemy count
+    // Scale target with player count, minimum 200
+    let player_count = state.players.len();
+    let target_count = (200 + player_count * 30).max(200);
 
     if current_count < target_count {
-        let to_spawn = target_count - current_count;
+        let to_spawn = (target_count - current_count).min(20); // cap per cycle
         let mut rng = rand::thread_rng();
 
+        // Collect player chunk positions for spawning near them
+        let player_chunks: Vec<(i32, i32)> = state.players.iter()
+            .filter(|e| !e.value().dead)
+            .map(|e| {
+                let p = e.value();
+                ((p.x / 32.0).floor() as i32, (p.y / 32.0).floor() as i32)
+            })
+            .collect();
+
         for _ in 0..to_spawn {
-            let cx: i32 = rng.gen_range(-3..=3);
-            let cy: i32 = rng.gen_range(-3..=3);
+            // Pick a chunk near a random player, or random if no players
+            let (bcx, bcy) = if !player_chunks.is_empty() {
+                player_chunks[rng.gen_range(0..player_chunks.len())]
+            } else {
+                (0, 0)
+            };
+            let cx = bcx + rng.gen_range(-3..=3);
+            let cy = bcy + rng.gen_range(-3..=3);
             let spawns = state.world.get_enemy_spawns(cx, cy);
             if let Some(&(x, y, zone_level)) = spawns.first() {
                 let enemy = generate_enemy(x, y, zone_level);

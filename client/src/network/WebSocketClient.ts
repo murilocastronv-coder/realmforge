@@ -13,6 +13,7 @@ export enum MessageType {
   BankDeposit = 9,
   BankWithdraw = 10,
   AttackPlayer = 11,
+  RequestChunk = 12,
 
   // Server → Client
   AuthResult = 50,
@@ -89,8 +90,14 @@ export class WebSocketClient {
   // Buffer for messages received before handlers are registered
   private pendingMessages: GameMessage[] = [];
 
+  private _connecting = false;
+
   get connected(): boolean {
     return this._connected;
+  }
+
+  get connecting(): boolean {
+    return this._connecting;
   }
 
   onStatusChange(listener: (status: 'connected' | 'disconnected' | 'reconnecting') => void): void {
@@ -102,12 +109,16 @@ export class WebSocketClient {
   }
 
   connect(): void {
+    // Guard against duplicate connection attempts
+    if (this._connected || this._connecting) return;
+    this._connecting = true;
     try {
       this.ws = new WebSocket(SERVER_URL);
 
       this.ws.onopen = () => {
         console.log('[WS] Connected to server');
         this._connected = true;
+        this._connecting = false;
         this.reconnectAttempts = 0;
         this.emitStatus('connected');
 
@@ -116,11 +127,7 @@ export class WebSocketClient {
           this.send(MessageType.Auth, this.lastAuthPayload);
         }
 
-        // Flush queued messages
-        while (this.messageQueue.length > 0) {
-          const msg = this.messageQueue.shift()!;
-          this.send(msg.type, msg.payload);
-        }
+        // Don't flush queue here — wait for AuthResult so server has our player_id
       };
 
       this.ws.onmessage = (event: MessageEvent) => {
@@ -135,15 +142,18 @@ export class WebSocketClient {
       this.ws.onclose = () => {
         console.log('[WS] Disconnected');
         this._connected = false;
+        this._connecting = false;
         this.emitStatus('disconnected');
         this.tryReconnect();
       };
 
       this.ws.onerror = (err) => {
         console.error('[WS] Error:', err);
+        this._connecting = false;
       };
     } catch (e) {
       console.error('[WS] Connection failed:', e);
+      this._connecting = false;
       this.tryReconnect();
     }
   }
@@ -197,6 +207,15 @@ export class WebSocketClient {
       // Buffer message for late-registered handlers (max 100 to prevent leak)
       if (this.pendingMessages.length < 100) {
         this.pendingMessages.push(msg);
+      }
+    }
+
+    // Flush queued messages after AuthResult (server now has our player_id)
+    if (msg.type === MessageType.AuthResult && this.messageQueue.length > 0) {
+      const toFlush = [...this.messageQueue];
+      this.messageQueue.length = 0;
+      for (const queued of toFlush) {
+        this.send(queued.type, queued.payload);
       }
     }
   }

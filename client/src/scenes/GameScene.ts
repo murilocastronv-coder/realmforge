@@ -162,10 +162,13 @@ export class GameScene extends Phaser.Scene {
 
     // Inventory (right side, toggled) — 356px wide
     this.inventoryUI = new InventoryUI(this, GAME_WIDTH - 370, 60);
-    this.inventoryUI.setOnItemClick((_item, index) => {
+    this.inventoryUI.setOnItemClick((item, index) => {
       if (this.bankUI.isVisible()) {
         // Bank is open — deposit item instead of equipping
         this.network.send(MessageType.BankDeposit, { inventorySlot: index });
+      } else if (!item.slot) {
+        // No equipment slot — it's a consumable, use it
+        this.network.send(MessageType.UseItem, { action: 'use', slotIndex: index });
       } else {
         this.network.send(MessageType.EquipItem, { slotIndex: index });
       }
@@ -200,6 +203,10 @@ export class GameScene extends Phaser.Scene {
     // --- Input handling ---
     this.input.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
       if (pointer.rightButtonDown() || this.isDead || this.tutorial?.isActive()) return;
+
+      // Don't process world clicks if pointer hit a UI element (depth >= 2000)
+      const hitObjects = this.input.hitTestPointer(pointer);
+      if (hitObjects.some((obj: Phaser.GameObjects.GameObject) => (obj as any).depth >= 2000)) return;
 
       const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
       const gridPos = screenToWorld(worldPoint.x, worldPoint.y);
@@ -248,13 +255,9 @@ export class GameScene extends Phaser.Scene {
     // Network handlers
     this.setupNetworkHandlers();
 
-    // Generate initial chunks
+    // Generate initial chunks — server sends initial 5×5 on auth,
+    // and requestChunksAround handles requesting any missing
     this.requestChunksAround(0, 0);
-    for (let dx = -2; dx <= 2; dx++) {
-      for (let dy = -2; dy <= 2; dy++) {
-        this.generateLocalChunk(dx, dy);
-      }
-    }
 
     // Welcome messages
     this.chatBox.addSystemMessage('Welcome to RealmForge! Click to move.');
@@ -360,6 +363,28 @@ export class GameScene extends Phaser.Scene {
 
   // --- Network Handlers ---
   private setupNetworkHandlers(): void {
+    // Handle re-authentication (reconnect) — update playerId
+    this.network.on(MessageType.AuthResult, (msg) => {
+      try {
+        const payload = msg.payload as { success: boolean; playerId?: string };
+        if (payload.success && payload.playerId && payload.playerId !== this.playerId) {
+          const oldId = this.playerId;
+          this.playerId = payload.playerId;
+          this.registry.set('playerId', payload.playerId);
+          // Clean up old entity sprite if it exists
+          const oldEntity = this.entities.get(oldId);
+          if (oldEntity) {
+            oldEntity.sprite.destroy();
+            oldEntity.nameText.destroy();
+            this.entities.delete(oldId);
+          }
+          this.chatBox.addSystemMessage('Reconnected successfully.');
+        }
+      } catch (e) {
+        console.error('[GameScene] AuthResult reconnect error:', e);
+      }
+    });
+
     this.network.on(MessageType.EntityUpdate, (msg) => {
       try {
         const payload = msg.payload as { entities: EntityState[] };
@@ -497,10 +522,13 @@ export class GameScene extends Phaser.Scene {
           equipment?: Array<{ slot: string; item: GameItem }>;
           gold?: number;
         };
-        // Sync inventory grid
+        // Sync inventory grid — place items at their correct slotIndex
         const paddedItems: (GameItem | null)[] = new Array(40).fill(null);
-        for (let i = 0; i < payload.items.length && i < 40; i++) {
-          paddedItems[i] = payload.items[i];
+        for (const item of payload.items) {
+          const idx = (item as any).slotIndex;
+          if (typeof idx === 'number' && idx >= 0 && idx < 40) {
+            paddedItems[idx] = item;
+          }
         }
         this.inventoryUI.setItems(paddedItems);
         // Sync equipment
@@ -552,15 +580,8 @@ export class GameScene extends Phaser.Scene {
       }
     });
 
-    // Chat messages
-    this.network.on(MessageType.ChatMessage, (msg) => {
-      try {
-        const { sender, text, channel } = msg.payload as { sender: string; text: string; channel?: string };
-        this.chatBox.addMessage(sender, text, channel || 'global');
-      } catch (e) {
-        console.error('[GameScene] ChatMessage error:', e);
-      }
-    });
+    // NOTE: ChatMessage is handled directly by ChatBox (see ChatBox constructor).
+    // No duplicate handler here to avoid double messages.
   }
 
   // --- Entity Management ---
@@ -734,7 +755,8 @@ export class GameScene extends Phaser.Scene {
         const key = `${cx + dx},${cy + dy}`;
         if (!this.loadedChunks.has(key)) {
           this.loadedChunks.add(key);
-          this.generateLocalChunk(cx + dx, cy + dy);
+          // Request chunk from server (authoritative terrain)
+          this.network.send(MessageType.RequestChunk, { chunkX: cx + dx, chunkY: cy + dy });
         }
       }
     }

@@ -73,8 +73,13 @@ export class BankUI {
 
   setItems(items: (GameItem | null)[]): void {
     this.items = new Array(BANK_COLS * BANK_ROWS).fill(null);
-    for (let i = 0; i < items.length && i < this.items.length; i++) {
-      this.items[i] = items[i];
+    for (const item of items) {
+      if (item) {
+        const idx = (item as any).slotIndex;
+        if (typeof idx === 'number' && idx >= 0 && idx < this.items.length) {
+          this.items[idx] = item;
+        }
+      }
     }
     this.refreshDisplay();
   }

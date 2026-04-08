@@ -16,6 +16,7 @@ pub const MSG_UNEQUIP_ITEM: u8 = 8;
 pub const MSG_BANK_DEPOSIT: u8 = 9;
 pub const MSG_BANK_WITHDRAW: u8 = 10;
 pub const MSG_ATTACK_PLAYER: u8 = 11;
+pub const MSG_REQUEST_CHUNK: u8 = 12;
 
 // Server → Client
 pub const MSG_AUTH_RESULT: u8 = 50;
