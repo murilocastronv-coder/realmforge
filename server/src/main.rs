@@ -363,6 +363,11 @@ async fn handle_message(
                 }
             }
         }
+        MSG_USE_ITEM => {
+            if let Some(pid) = player_id {
+                handle_use_item(state, pid, &msg.payload);
+            }
+        }
         _ => {
             warn!("Unknown message type: {}", msg.msg_type);
         }
@@ -966,6 +971,161 @@ fn handle_bank_withdraw(state: &Arc<AppState>, player_id: Uuid, bank_slot: usize
                 }).to_string();
                 state.send_to(&player_id, &msg);
             }
+        }
+    }
+}
+
+// ─── UseItem / Crafting Handler ─────────────────────────────
+
+fn handle_use_item(state: &Arc<AppState>, player_id: Uuid, payload: &serde_json::Value) {
+    let action = payload.get("action").and_then(|v| v.as_str()).unwrap_or("");
+
+    match action {
+        "craft" => {
+            let recipe_id = match payload.get("recipeId").and_then(|v| v.as_str()) {
+                Some(id) => id.to_string(),
+                None => return,
+            };
+            handle_craft(state, player_id, &recipe_id);
+        }
+        "buy" => {
+            // Marketplace buy — placeholder: send feedback
+            let listing_id = payload.get("listingId").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let msg = json!({
+                "type": MSG_CHAT_MESSAGE,
+                "payload": { "sender": "System", "text": format!("Marketplace buying is not yet implemented (listing: {}).", listing_id), "channel": "system" }
+            }).to_string();
+            state.send_to(&player_id, &msg);
+        }
+        _ => {
+            warn!("Unknown UseItem action: {}", action);
+        }
+    }
+}
+
+/// Simple crafting: match recipe ID, check materials in inventory, consume, produce result.
+fn handle_craft(state: &Arc<AppState>, player_id: Uuid, recipe_id: &str) {
+    // Server-side recipe definitions (mirroring client defaults)
+    struct Recipe {
+        id: &'static str,
+        name: &'static str,
+        materials: &'static [(&'static str, u32)], // (template_id, quantity)
+        result_name: &'static str,
+        result_type: &'static str,
+        result_slot: Option<&'static str>,
+        result_rarity: u8,
+        result_level: u32,
+        result_stat_key: &'static str,
+        result_stat_val: i32,
+    }
+
+    let recipes: &[Recipe] = &[
+        Recipe { id: "iron_sword", name: "Iron Sword", materials: &[("iron_ore", 3), ("wood", 1)],
+            result_name: "Iron Sword", result_type: "weapon", result_slot: Some("weapon"),
+            result_rarity: 0, result_level: 1, result_stat_key: "ATK", result_stat_val: 8 },
+        Recipe { id: "iron_shield", name: "Iron Shield", materials: &[("iron_ore", 4)],
+            result_name: "Iron Shield", result_type: "armor", result_slot: Some("shield"),
+            result_rarity: 0, result_level: 1, result_stat_key: "DEF", result_stat_val: 6 },
+        Recipe { id: "health_potion", name: "Health Potion", materials: &[("herb", 2)],
+            result_name: "Health Potion", result_type: "consumable", result_slot: None,
+            result_rarity: 0, result_level: 1, result_stat_key: "HP", result_stat_val: 50 },
+        Recipe { id: "leather_armor", name: "Leather Armor", materials: &[("leather", 3), ("iron_ore", 1)],
+            result_name: "Leather Armor", result_type: "armor", result_slot: Some("armor"),
+            result_rarity: 0, result_level: 3, result_stat_key: "DEF", result_stat_val: 10 },
+        Recipe { id: "steel_sword", name: "Steel Sword", materials: &[("iron_ore", 5), ("coal", 2)],
+            result_name: "Steel Sword", result_type: "weapon", result_slot: Some("weapon"),
+            result_rarity: 1, result_level: 5, result_stat_key: "ATK", result_stat_val: 18 },
+        Recipe { id: "gold_ring", name: "Gold Ring", materials: &[("gold_ore", 2)],
+            result_name: "Gold Ring", result_type: "armor", result_slot: Some("ring1"),
+            result_rarity: 1, result_level: 5, result_stat_key: "LCK", result_stat_val: 5 },
+    ];
+
+    let recipe = match recipes.iter().find(|r| r.id == recipe_id) {
+        Some(r) => r,
+        None => {
+            let msg = json!({
+                "type": MSG_CHAT_MESSAGE,
+                "payload": { "sender": "System", "text": "Unknown recipe.", "channel": "system" }
+            }).to_string();
+            state.send_to(&player_id, &msg);
+            return;
+        }
+    };
+
+    if let Some(mut player) = state.players.get_mut(&player_id) {
+        // Check if player has required materials
+        for &(template_id, qty_needed) in recipe.materials {
+            let has_qty: u32 = player.inventory.iter().flatten()
+                .filter(|item| item.template_id == template_id)
+                .map(|item| item.quantity)
+                .sum();
+            if has_qty < qty_needed {
+                let msg = json!({
+                    "type": MSG_CHAT_MESSAGE,
+                    "payload": { "sender": "System", "text": format!("Not enough {}! Need {} but have {}.", template_id.replace('_', " "), qty_needed, has_qty), "channel": "system" }
+                }).to_string();
+                state.send_to(&player_id, &msg);
+                return;
+            }
+        }
+
+        // Consume materials
+        for &(template_id, mut qty_needed) in recipe.materials {
+            for slot in player.inventory.iter_mut() {
+                if qty_needed == 0 { break; }
+                if let Some(item) = slot {
+                    if item.template_id == template_id {
+                        if item.quantity <= qty_needed {
+                            qty_needed -= item.quantity;
+                            *slot = None;
+                        } else {
+                            item.quantity -= qty_needed;
+                            qty_needed = 0;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Create result item
+        let mut stats = std::collections::HashMap::new();
+        stats.insert(recipe.result_stat_key.to_string(), recipe.result_stat_val);
+
+        let result_item = Item {
+            id: Uuid::new_v4().to_string(),
+            template_id: recipe.id.to_string(),
+            name: recipe.result_name.to_string(),
+            rarity: recipe.result_rarity,
+            item_type: match recipe.result_type {
+                "weapon" => ItemType::Weapon,
+                "armor" => ItemType::Armor,
+                "consumable" => ItemType::Consumable,
+                "material" => ItemType::Material,
+                _ => ItemType::Misc,
+            },
+            slot: recipe.result_slot.map(|s| s.to_string()),
+            stackable: recipe.result_type == "consumable" || recipe.result_type == "material",
+            quantity: 1,
+            level: recipe.result_level,
+            stats,
+            description: format!("Crafted {}", recipe.result_name),
+            affixes: vec![],
+        };
+
+        if player.add_item(result_item) {
+            let craft_msg = json!({
+                "type": MSG_CHAT_MESSAGE,
+                "payload": { "sender": "System", "text": format!("✅ Crafted {}!", recipe.name), "channel": "system" }
+            }).to_string();
+            drop(player);
+            state.send_to(&player_id, &craft_msg);
+            send_inventory_update(state, &player_id);
+        } else {
+            let msg = json!({
+                "type": MSG_CHAT_MESSAGE,
+                "payload": { "sender": "System", "text": "Inventory full! Cannot craft.", "channel": "system" }
+            }).to_string();
+            state.send_to(&player_id, &msg);
         }
     }
 }

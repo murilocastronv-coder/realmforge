@@ -7,6 +7,7 @@ import { GAME_WIDTH, GAME_HEIGHT } from '../utils/Constants';
  */
 export class LoginScene extends Phaser.Scene {
   private network!: WebSocketClient;
+  private authHandler?: (msg: { type: number; payload: unknown }) => void;
 
   constructor() {
     super({ key: 'LoginScene' });
@@ -124,25 +125,39 @@ export class LoginScene extends Phaser.Scene {
       if (e.key === 'Enter') doAuth(false);
     });
 
-    this.network.on(MessageType.AuthResult, (msg) => {
+    this.authHandler = (msg) => {
       const result = msg.payload as { success: boolean; playerId?: string; error?: string };
       if (result.success) {
         statusText.setText('✅ Success! Entering world...');
         statusText.setColor('#00cc66');
         this.registry.set('playerId', result.playerId);
         this.registry.set('username', usernameInput.value.trim());
-        // Clean up DOM inputs and resize handlers
-        this.resizeHandlers.forEach(h => window.removeEventListener('resize', h));
-        this.resizeHandlers = [];
-        usernameInput.remove();
-        passwordInput.remove();
+        // Clean up DOM inputs, resize handlers, and auth listener
+        this.cleanup(usernameInput, passwordInput);
         this.cameras.main.fadeOut(400, 0, 0, 0);
         this.time.delayedCall(450, () => this.scene.start('GameScene'));
       } else {
         statusText.setText(result.error || 'Authentication failed');
         statusText.setColor('#ff4444');
       }
+    };
+    this.network.on(MessageType.AuthResult, this.authHandler);
+
+    // Clean up listener on scene shutdown (prevents accumulation on restart)
+    this.events.once('shutdown', () => {
+      this.cleanup(usernameInput, passwordInput);
     });
+  }
+
+  private cleanup(usernameInput?: HTMLInputElement, passwordInput?: HTMLInputElement): void {
+    if (this.authHandler) {
+      this.network.off(MessageType.AuthResult, this.authHandler);
+      this.authHandler = undefined;
+    }
+    this.resizeHandlers.forEach(h => window.removeEventListener('resize', h));
+    this.resizeHandlers = [];
+    usernameInput?.remove();
+    passwordInput?.remove();
   }
 
   private resizeHandlers: Array<() => void> = [];

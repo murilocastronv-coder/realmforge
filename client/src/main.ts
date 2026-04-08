@@ -29,21 +29,8 @@ const config: Phaser.Types.Core.GameConfig = {
 
 const game = new Phaser.Game(config);
 
-// Handle window focus
-window.addEventListener('blur', () => {
-  game.scene.scenes.forEach(scene => {
-    if (scene.scene.isActive()) {
-      scene.scene.pause();
-    }
-  });
-});
-
-window.addEventListener('focus', () => {
-  game.scene.scenes.forEach(scene => {
-    if (scene.scene.isPaused()) {
-      scene.scene.resume();
-    }
-  });
-});
+// NOTE: No blur/focus pause — WebSocket messages continue while tab is hidden,
+// and pausing scenes causes desync (combat events fire while game is frozen).
+// The game keeps running normally when tab loses focus.
 
 export default game;

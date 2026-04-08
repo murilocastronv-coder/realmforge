@@ -73,8 +73,9 @@ export class TutorialOverlay {
     this.container.setDepth(8000);
     this.container.setVisible(false);
 
-    // Dark backdrop
+    // Dark backdrop — interactive to block clicks passing through to the game
     this.backdrop = scene.add.rectangle(width / 2, height / 2, width + 100, height + 100, 0x000000, 0.55);
+    this.backdrop.setInteractive();
     this.container.add(this.backdrop);
 
     // Panel
@@ -97,7 +98,7 @@ export class TutorialOverlay {
 
     // Body
     this.bodyText = scene.add.text(px + pw / 2, py + 52, '', {
-      fontSize: '12px', color: '#ccddeee', lineSpacing: 6,
+      fontSize: '12px', color: '#ccddee', lineSpacing: 6,
       align: 'center',
     }).setOrigin(0.5, 0);
     this.container.add(this.bodyText);

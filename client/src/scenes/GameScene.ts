@@ -157,8 +157,8 @@ export class GameScene extends Phaser.Scene {
     // Health bars (floating over entities)
     this.healthBars = new HealthBars(this);
 
-    // Chat (bottom-left)
-    this.chatBox = new ChatBox(this, this.network, 10, GAME_HEIGHT - 220);
+    // Chat (bottom-left, above hints bar)
+    this.chatBox = new ChatBox(this, this.network, 10, GAME_HEIGHT - 244);
 
     // Inventory (right side, toggled) — 356px wide
     this.inventoryUI = new InventoryUI(this, GAME_WIDTH - 370, 60);
@@ -199,7 +199,7 @@ export class GameScene extends Phaser.Scene {
 
     // --- Input handling ---
     this.input.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
-      if (pointer.rightButtonDown() || this.isDead) return;
+      if (pointer.rightButtonDown() || this.isDead || this.tutorial?.isActive()) return;
 
       const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
       const gridPos = screenToWorld(worldPoint.x, worldPoint.y);
@@ -275,7 +275,8 @@ export class GameScene extends Phaser.Scene {
   }
 
   update(_time: number, delta: number): void {
-    const speed = INTERPOLATION_SPEED * (delta / 16.67);
+    // Clamp interpolation factor to prevent overshooting on frame drops
+    const speed = Math.min(INTERPOLATION_SPEED * (delta / 16.67), 1.0);
 
     // Death timer countdown
     if (this.isDead) {
@@ -360,138 +361,205 @@ export class GameScene extends Phaser.Scene {
   // --- Network Handlers ---
   private setupNetworkHandlers(): void {
     this.network.on(MessageType.EntityUpdate, (msg) => {
-      const payload = msg.payload as { entities: EntityState[] };
-      const seenIds = new Set<string>();
+      try {
+        const payload = msg.payload as { entities: EntityState[] };
+        const seenIds = new Set<string>();
 
-      for (const entity of payload.entities) {
-        seenIds.add(entity.id);
-        if (entity.id === this.playerId) {
-          this.targetGridX = entity.x;
-          this.targetGridY = entity.y;
-          if (entity.hp !== undefined) {
-            this.playerStats.hp = entity.hp;
-            this.playerStats.maxHp = entity.maxHp || 100;
-            this.statsUI.updateStats(this.playerStats);
+        for (const entity of payload.entities) {
+          seenIds.add(entity.id);
+          if (entity.id === this.playerId) {
+            this.targetGridX = entity.x;
+            this.targetGridY = entity.y;
+            if (entity.hp !== undefined) {
+              this.playerStats.hp = entity.hp;
+              this.playerStats.maxHp = entity.maxHp || 100;
+              this.statsUI.updateStats(this.playerStats);
+            }
+            continue;
           }
-          continue;
+          this.updateRemoteEntity(entity);
         }
-        this.updateRemoteEntity(entity);
-      }
 
-      // Remove entities no longer visible from server
-      for (const [id] of this.entities) {
-        if (!seenIds.has(id)) {
-          this.removeEntity(id);
+        // Remove entities no longer visible from server
+        for (const [id] of this.entities) {
+          if (!seenIds.has(id)) {
+            this.removeEntity(id);
+          }
         }
+      } catch (e) {
+        console.error('[GameScene] EntityUpdate error:', e);
+      }
+    });
+
+    this.network.on(MessageType.PlayerJoined, (msg) => {
+      try {
+        const { id, username } = msg.payload as { id: string; username: string };
+        if (id !== this.playerId) {
+          this.chatBox.addMessage('System', `${username} joined the world.`, 'system');
+        }
+      } catch (e) {
+        console.error('[GameScene] PlayerJoined error:', e);
       }
     });
 
     this.network.on(MessageType.PlayerLeft, (msg) => {
-      const { id } = msg.payload as { id: string };
-      this.removeEntity(id);
+      try {
+        const { id } = msg.payload as { id: string };
+        this.removeEntity(id);
+      } catch (e) {
+        console.error('[GameScene] PlayerLeft error:', e);
+      }
     });
 
     this.network.on(MessageType.ChunkData, (msg) => {
-      this.renderChunk(msg.payload as ChunkDataPayload);
+      try {
+        this.renderChunk(msg.payload as ChunkDataPayload);
+      } catch (e) {
+        console.error('[GameScene] ChunkData error:', e);
+      }
     });
 
     this.network.on(MessageType.StatsUpdate, (msg) => {
-      const stats = msg.payload as Partial<PlayerStats>;
-      Object.assign(this.playerStats, stats);
-      this.statsUI.updateStats(this.playerStats);
+      try {
+        const stats = msg.payload as Partial<PlayerStats>;
+        Object.assign(this.playerStats, stats);
+        this.statsUI.updateStats(this.playerStats);
+      } catch (e) {
+        console.error('[GameScene] StatsUpdate error:', e);
+      }
     });
 
     this.network.on(MessageType.LevelUp, (msg) => {
-      const { level } = msg.payload as { level: number };
-      this.playerStats.level = level;
-      this.statsUI.updateStats(this.playerStats);
-      this.chatBox.addMessage('System', `⭐ Level Up! You are now level ${level}!`, 'system');
-      this.showLevelUpEffect();
+      try {
+        const { level } = msg.payload as { level: number };
+        this.playerStats.level = level;
+        this.statsUI.updateStats(this.playerStats);
+        this.chatBox.addMessage('System', `⭐ Level Up! You are now level ${level}!`, 'system');
+        this.showLevelUpEffect();
+      } catch (e) {
+        console.error('[GameScene] LevelUp error:', e);
+      }
     });
 
     this.network.on(MessageType.CombatEvent, (msg) => {
-      const { attackerId, targetId, damage, isCrit } = msg.payload as {
-        attackerId: string; targetId: string; damage: number; isCrit: boolean;
-      };
-      const target = this.entities.get(targetId);
-      if (target) {
-        this.showDamageNumber(target.sprite.x, target.sprite.y - 20, damage, isCrit);
-        if (target.hp !== undefined) {
-          target.hp = Math.max(0, target.hp - damage);
+      try {
+        const { attackerId, targetId, damage, isCrit } = msg.payload as {
+          attackerId: string; targetId: string; damage: number; isCrit: boolean;
+        };
+        const target = this.entities.get(targetId);
+        if (target) {
+          this.showDamageNumber(target.sprite.x, target.sprite.y - 20, damage, isCrit);
+          if (target.hp !== undefined) {
+            target.hp = Math.max(0, target.hp - damage);
+          }
         }
-      }
-      if (targetId === this.playerId) {
-        this.showDamageNumber(this.playerSprite.x, this.playerSprite.y - 55, damage, isCrit);
+        if (targetId === this.playerId) {
+          this.showDamageNumber(this.playerSprite.x, this.playerSprite.y - 55, damage, isCrit);
+        }
+      } catch (e) {
+        console.error('[GameScene] CombatEvent error:', e);
       }
     });
 
-    this.network.on(MessageType.Death, (_msg) => {
-      this.isDead = true;
-      this.respawnTimer = 5;
-      this.selectedEntityId = null;
-      this.deathOverlay.setVisible(true);
-      this.deathText.setVisible(true);
-      this.deathText.setText('💀 YOU DIED\nRespawning in 5s...');
-      this.showDeathEffect(this.playerSprite.x, this.playerSprite.y);
-      this.chatBox.addMessage('System', '💀 You died! Respawning at town...', 'combat');
+    this.network.on(MessageType.Death, (msg) => {
+      try {
+        const { killedBy } = (msg.payload || {}) as { killedBy?: string };
+        this.isDead = true;
+        this.respawnTimer = 5;
+        this.selectedEntityId = null;
+        this.deathOverlay.setVisible(true);
+        this.deathText.setVisible(true);
+        this.deathText.setText('💀 YOU DIED\nRespawning in 5s...');
+        this.showDeathEffect(this.playerSprite.x, this.playerSprite.y);
+        const deathMsg = killedBy
+          ? `💀 Killed by ${killedBy}! Respawning at town...`
+          : '💀 You died! Respawning at town...';
+        this.chatBox.addMessage('System', deathMsg, 'combat');
+      } catch (e) {
+        console.error('[GameScene] Death error:', e);
+      }
     });
 
     this.network.on(MessageType.ItemDrop, (msg) => {
-      const { itemName, rarity } = msg.payload as { itemName: string; rarity: number };
-      const rarityNames = ['Common', 'Uncommon', 'Rare', 'Epic', 'Legendary', 'Mythic'];
-      this.chatBox.addMessage('Loot', `Picked up ${rarityNames[rarity] || ''} ${itemName}`, 'system');
+      try {
+        const { itemName, rarity } = msg.payload as { itemName: string; rarity: number };
+        const rarityNames = ['Common', 'Uncommon', 'Rare', 'Epic', 'Legendary', 'Mythic'];
+        this.chatBox.addMessage('Loot', `Picked up ${rarityNames[rarity] || ''} ${itemName}`, 'system');
+      } catch (e) {
+        console.error('[GameScene] ItemDrop error:', e);
+      }
     });
 
     this.network.on(MessageType.InventoryUpdate, (msg) => {
-      const payload = msg.payload as {
-        items: GameItem[];
-        equipment?: Array<{ slot: string; item: GameItem }>;
-        gold?: number;
-      };
-      // Sync inventory grid
-      const paddedItems: (GameItem | null)[] = new Array(40).fill(null);
-      for (let i = 0; i < payload.items.length && i < 40; i++) {
-        paddedItems[i] = payload.items[i];
-      }
-      this.inventoryUI.setItems(paddedItems);
-      // Sync equipment
-      if (payload.equipment) {
-        this.equipmentUI.setAllEquipment(payload.equipment);
-      }
-      // Sync gold
-      if (payload.gold !== undefined) {
-        this.inventoryUI.setGold(payload.gold);
+      try {
+        const payload = msg.payload as {
+          items: GameItem[];
+          equipment?: Array<{ slot: string; item: GameItem }>;
+          gold?: number;
+        };
+        // Sync inventory grid
+        const paddedItems: (GameItem | null)[] = new Array(40).fill(null);
+        for (let i = 0; i < payload.items.length && i < 40; i++) {
+          paddedItems[i] = payload.items[i];
+        }
+        this.inventoryUI.setItems(paddedItems);
+        // Sync equipment
+        if (payload.equipment) {
+          this.equipmentUI.setAllEquipment(payload.equipment);
+        }
+        // Sync gold
+        if (payload.gold !== undefined) {
+          this.inventoryUI.setGold(payload.gold);
+        }
+      } catch (e) {
+        console.error('[GameScene] InventoryUpdate error:', e);
       }
     });
 
     this.network.on(MessageType.Respawn, (msg) => {
-      const { x, y } = msg.payload as { x: number; y: number };
-      this.targetGridX = x;
-      this.targetGridY = y;
-      this.playerGridX = x;
-      this.playerGridY = y;
-      this.isDead = false;
-      this.deathOverlay.setVisible(false);
-      this.deathText.setVisible(false);
-      this.chatBox.addSystemMessage('✅ You have respawned at town.');
+      try {
+        const { x, y } = msg.payload as { x: number; y: number };
+        this.targetGridX = x;
+        this.targetGridY = y;
+        this.playerGridX = x;
+        this.playerGridY = y;
+        this.isDead = false;
+        this.deathOverlay.setVisible(false);
+        this.deathText.setVisible(false);
+        this.chatBox.addSystemMessage('✅ You have respawned at town.');
+      } catch (e) {
+        console.error('[GameScene] Respawn error:', e);
+      }
     });
 
     // Ground items nearby
     this.network.on(MessageType.GroundItems, (msg) => {
-      const { items } = msg.payload as { items: Array<{ id: string; name: string; rarity: number; x: number; y: number }> };
-      this.updateGroundItems(items);
+      try {
+        const { items } = msg.payload as { items: Array<{ id: string; name: string; rarity: number; x: number; y: number }> };
+        this.updateGroundItems(items);
+      } catch (e) {
+        console.error('[GameScene] GroundItems error:', e);
+      }
     });
 
     // Bank contents update
     this.network.on(MessageType.BankUpdate, (msg) => {
-      const { items } = msg.payload as { items: GameItem[] };
-      this.bankUI.setItems(items);
+      try {
+        const { items } = msg.payload as { items: GameItem[] };
+        this.bankUI.setItems(items);
+      } catch (e) {
+        console.error('[GameScene] BankUpdate error:', e);
+      }
     });
 
     // Chat messages
     this.network.on(MessageType.ChatMessage, (msg) => {
-      const { sender, text, channel } = msg.payload as { sender: string; text: string; channel?: string };
-      this.chatBox.addMessage(sender, text, channel || 'global');
+      try {
+        const { sender, text, channel } = msg.payload as { sender: string; text: string; channel?: string };
+        this.chatBox.addMessage(sender, text, channel || 'global');
+      } catch (e) {
+        console.error('[GameScene] ChatMessage error:', e);
+      }
     });
   }
 
