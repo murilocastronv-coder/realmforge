@@ -1,7 +1,7 @@
 import Phaser from 'phaser';
 import { WebSocketClient, MessageType, EntityState, ChunkDataPayload } from '../network/WebSocketClient';
 import { worldToScreen, screenToWorld, TILE_WIDTH, TILE_HEIGHT } from '../utils/IsoMath';
-import { CHUNK_SIZE, INTERPOLATION_SPEED, GAME_WIDTH, GAME_HEIGHT } from '../utils/Constants';
+import { CHUNK_SIZE, PLAYER_SPEED, GAME_WIDTH, GAME_HEIGHT } from '../utils/Constants';
 import { InventoryUI, GameItem } from '../ui/Inventory';
 import { EquipmentUI } from '../ui/Equipment';
 import { StatsUI, PlayerStats } from '../ui/Stats';
@@ -310,8 +310,10 @@ export class GameScene extends Phaser.Scene {
   }
 
   update(_time: number, delta: number): void {
-    // Clamp interpolation factor to prevent overshooting on frame drops
-    const speed = Math.min(INTERPOLATION_SPEED * (delta / 16.67), 1.0);
+    // Constant-speed movement: tiles per millisecond
+    const moveStep = PLAYER_SPEED * (delta / 1000);
+    // Remote entity interpolation uses proportional lerp (smoother for network entities)
+    const remoteLerp = Math.min(0.15 * (delta / 16.67), 1.0);
 
     // Death timer countdown
     if (this.isDead) {
@@ -330,15 +332,16 @@ export class GameScene extends Phaser.Scene {
       if (this.keyD.isDown || this.cursors.right.isDown) dx += 1;
 
       if (dx !== 0 || dy !== 0) {
-        // Normalize diagonal movement
         const len = Math.sqrt(dx * dx + dy * dy);
         dx /= len;
         dy /= len;
 
-        // Set target 2 tiles ahead in movement direction
-        const moveAhead = 2.0;
-        this.targetGridX = this.playerGridX + dx * moveAhead;
-        this.targetGridY = this.playerGridY + dy * moveAhead;
+        // Move player directly at constant speed (matches server 3 tiles/sec)
+        this.playerGridX += dx * moveStep;
+        this.playerGridY += dy * moveStep;
+        // Keep target ahead so click-to-move doesn't interfere
+        this.targetGridX = this.playerGridX + dx * 2.0;
+        this.targetGridY = this.playerGridY + dy * 2.0;
 
         // Throttle network sends to ~10/sec
         const now = _time;
@@ -349,19 +352,40 @@ export class GameScene extends Phaser.Scene {
             targetX: this.targetGridX, targetY: this.targetGridY, seq: this.moveSeq,
           });
         }
+      } else {
+        // No WASD held — move toward click target at constant speed
+        const toTargetX = this.targetGridX - this.playerGridX;
+        const toTargetY = this.targetGridY - this.playerGridY;
+        const distToTarget = Math.sqrt(toTargetX * toTargetX + toTargetY * toTargetY);
+        if (distToTarget > 0.05) {
+          const step = Math.min(moveStep, distToTarget);
+          this.playerGridX += (toTargetX / distToTarget) * step;
+          this.playerGridY += (toTargetY / distToTarget) * step;
+        } else {
+          this.playerGridX = this.targetGridX;
+          this.playerGridY = this.targetGridY;
+        }
+      }
+    } else if (!this.isDead) {
+      // Chat focused or not moving — still interpolate toward target at constant speed
+      const toTargetX = this.targetGridX - this.playerGridX;
+      const toTargetY = this.targetGridY - this.playerGridY;
+      const distToTarget = Math.sqrt(toTargetX * toTargetX + toTargetY * toTargetY);
+      if (distToTarget > 0.05) {
+        const step = Math.min(moveStep, distToTarget);
+        this.playerGridX += (toTargetX / distToTarget) * step;
+        this.playerGridY += (toTargetY / distToTarget) * step;
       }
     }
 
-    // Interpolate player toward target
-    this.playerGridX = Phaser.Math.Linear(this.playerGridX, this.targetGridX, speed);
-    this.playerGridY = Phaser.Math.Linear(this.playerGridY, this.targetGridY, speed);
+    // Update player sprite position
     const screenPos = worldToScreen(this.playerGridX, this.playerGridY);
     this.playerSprite.setPosition(screenPos.x, screenPos.y - 27);
     this.playerNameText.setPosition(screenPos.x, screenPos.y - 60);
     this.playerSprite.setDepth(screenPos.y + 1000);
     this.playerNameText.setDepth(screenPos.y + 1001);
 
-    // Draw player auras (attack range = 2 tiles, pickup range = 1.5 tiles)
+    // Draw player auras
     this.drawPlayerAuras(screenPos.x, screenPos.y);
 
     // Coords display
@@ -373,8 +397,8 @@ export class GameScene extends Phaser.Scene {
     const minimapEntities: Array<{ x: number; y: number; type: string }> = [];
 
     this.entities.forEach((entity, id) => {
-      const ex = Phaser.Math.Linear(entity.sprite.x, entity.targetX, speed);
-      const ey = Phaser.Math.Linear(entity.sprite.y, entity.targetY, speed);
+      const ex = Phaser.Math.Linear(entity.sprite.x, entity.targetX, remoteLerp);
+      const ey = Phaser.Math.Linear(entity.sprite.y, entity.targetY, remoteLerp);
       entity.sprite.setPosition(ex, ey);
       entity.nameText.setPosition(ex, ey - 38);
 
@@ -489,26 +513,38 @@ export class GameScene extends Phaser.Scene {
         for (const entity of payload.entities) {
           seenIds.add(entity.id);
           if (entity.id === this.playerId) {
-            // Use server's target as our destination (prevents snap-back)
-            if (entity.targetX !== undefined && entity.targetY !== undefined) {
+            // Check if WASD keys are currently held — if so, client owns movement
+            const wasdActive = !this.chatBox.isFocused() && (
+              this.keyW.isDown || this.keyS.isDown || this.keyA.isDown || this.keyD.isDown ||
+              this.cursors.up.isDown || this.cursors.down.isDown ||
+              this.cursors.left.isDown || this.cursors.right.isDown
+            );
+
+            // Only accept server target if WASD is NOT active (click-to-move mode)
+            if (!wasdActive && entity.targetX !== undefined && entity.targetY !== undefined) {
               this.targetGridX = entity.targetX;
               this.targetGridY = entity.targetY;
             }
-            // Soft-correct current position toward server's authoritative position
-            // to prevent client/server drift without jarring teleports
+
+            // Server position correction — only for large desync (>5 tiles = hard snap)
+            // Moderate drift is expected since client predicts movement
             const drift = Math.sqrt(
               Math.pow(this.playerGridX - entity.x, 2) +
               Math.pow(this.playerGridY - entity.y, 2)
             );
-            if (drift > 3.0) {
-              // Large desync — hard snap to server position
+            if (drift > 5.0) {
+              // Extreme desync — hard snap
               this.playerGridX = entity.x;
               this.playerGridY = entity.y;
-            } else if (drift > 0.3) {
-              // Small drift — gently pull toward server position
-              this.playerGridX = Phaser.Math.Linear(this.playerGridX, entity.x, 0.15);
-              this.playerGridY = Phaser.Math.Linear(this.playerGridY, entity.y, 0.15);
+              this.targetGridX = entity.targetX ?? entity.x;
+              this.targetGridY = entity.targetY ?? entity.y;
+            } else if (drift > 2.0) {
+              // Significant drift — gentle correction (5% pull)
+              this.playerGridX = Phaser.Math.Linear(this.playerGridX, entity.x, 0.05);
+              this.playerGridY = Phaser.Math.Linear(this.playerGridY, entity.y, 0.05);
             }
+            // drift < 2.0: no correction — trust client prediction
+
             if (entity.hp !== undefined) {
               this.playerStats.hp = entity.hp;
               this.playerStats.maxHp = entity.maxHp || 100;
