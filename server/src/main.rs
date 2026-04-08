@@ -5,6 +5,7 @@ mod world;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
+use rand::Rng;
 
 use axum::{
     Router,
@@ -39,6 +40,10 @@ struct AppState {
     enemies: DashMap<Uuid, EnemyData>,
     /// Generated chunks cache
     chunk_cache: DashMap<(i32, i32), ChunkData>,
+    /// Items on the ground
+    ground_items: DashMap<Uuid, GroundItem>,
+    /// Game tick counter
+    tick_count: std::sync::atomic::AtomicU64,
     /// Broadcast channel for global messages
     broadcast_tx: broadcast::Sender<String>,
 }
@@ -53,6 +58,8 @@ impl AppState {
             world: WorldGenerator::new(42),
             enemies: DashMap::new(),
             chunk_cache: DashMap::new(),
+            ground_items: DashMap::new(),
+            tick_count: std::sync::atomic::AtomicU64::new(0),
             broadcast_tx,
         }
     }
@@ -237,6 +244,52 @@ async fn handle_message(
                 }
             }
         }
+        MSG_ATTACK_PLAYER => {
+            if let Some(pid) = player_id {
+                if let Some(target_id_str) = msg.payload.get("targetId").and_then(|v| v.as_str()) {
+                    if let Ok(target_id) = Uuid::parse_str(target_id_str) {
+                        handle_pvp_attack(state, pid, target_id);
+                    }
+                }
+            }
+        }
+        MSG_PICKUP_ITEM => {
+            if let Some(pid) = player_id {
+                if let Some(item_id_str) = msg.payload.get("itemId").and_then(|v| v.as_str()) {
+                    if let Ok(item_id) = Uuid::parse_str(item_id_str) {
+                        handle_pickup_item(state, pid, item_id);
+                    }
+                }
+            }
+        }
+        MSG_EQUIP_ITEM => {
+            if let Some(pid) = player_id {
+                if let Some(slot_index) = msg.payload.get("slotIndex").and_then(|v| v.as_u64()) {
+                    handle_equip_item(state, pid, slot_index as usize);
+                }
+            }
+        }
+        MSG_UNEQUIP_ITEM => {
+            if let Some(pid) = player_id {
+                if let Some(slot) = msg.payload.get("slot").and_then(|v| v.as_str()) {
+                    handle_unequip_item(state, pid, slot);
+                }
+            }
+        }
+        MSG_BANK_DEPOSIT => {
+            if let Some(pid) = player_id {
+                if let Some(inv_slot) = msg.payload.get("inventorySlot").and_then(|v| v.as_u64()) {
+                    handle_bank_deposit(state, pid, inv_slot as usize);
+                }
+            }
+        }
+        MSG_BANK_WITHDRAW => {
+            if let Some(pid) = player_id {
+                if let Some(bank_slot) = msg.payload.get("bankSlot").and_then(|v| v.as_u64()) {
+                    handle_bank_withdraw(state, pid, bank_slot as usize);
+                }
+            }
+        }
         _ => {
             warn!("Unknown message type: {}", msg.msg_type);
         }
@@ -381,7 +434,7 @@ fn handle_chat(state: &Arc<AppState>, player_id: Uuid, payload: &ChatPayload) {
     }
 }
 
-// ─── Attack Handler ──────────────────────────────────────────
+// ─── Attack Handler (PvE) ────────────────────────────────────
 
 fn handle_attack(state: &Arc<AppState>, attacker_id: Uuid, target_id: Uuid) {
     let attacker_stats = {
@@ -389,57 +442,81 @@ fn handle_attack(state: &Arc<AppState>, attacker_id: Uuid, target_id: Uuid) {
             Some(p) => p,
             None => return,
         };
-        (player.atk, player.level, player.x, player.y)
+        if player.dead { return; }
+        (player.total_atk(), player.level, player.x, player.y, player.total_lck())
     };
 
-    let (atk, level, ax, ay) = attacker_stats;
+    let (atk, level, ax, ay, lck) = attacker_stats;
 
-    // Check if target is enemy
     if let Some(mut enemy) = state.enemies.get_mut(&target_id) {
         let dist = ((enemy.x - ax).powi(2) + (enemy.y - ay).powi(2)).sqrt();
-        if dist > 3.0 {
-            return; // Too far
-        }
+        if dist > 3.0 { return; }
 
-        // Damage formula
-        let raw_damage = atk as f64 * 1.0 * (0.9 + rand::random::<f64>() * 0.2);
+        // Damage formula with crit
+        let mut rng = rand::thread_rng();
+        let raw_damage = atk as f64 * (0.9 + rng.r#gen::<f64>() * 0.2);
         let def_reduction = enemy.def as f64 / (enemy.def as f64 + 100.0 + level as f64 * 2.0);
-        let final_damage = (raw_damage * (1.0 - def_reduction)).max(1.0) as i32;
 
+        let crit_chance = 0.05 + lck as f64 * 0.001;
+        let is_crit = rng.r#gen::<f64>() < crit_chance;
+        let crit_mult = if is_crit { 1.5 + lck as f64 * 0.005 } else { 1.0 };
+
+        let final_damage = (raw_damage * (1.0 - def_reduction) * crit_mult).max(1.0) as i32;
         enemy.hp -= final_damage;
 
-        // Broadcast combat event
         let combat_msg = json!({
             "type": MSG_COMBAT_EVENT,
             "payload": {
                 "attackerId": attacker_id.to_string(),
                 "targetId": target_id.to_string(),
                 "damage": final_damage,
+                "isCrit": is_crit,
                 "targetHp": enemy.hp.max(0),
             }
-        })
-        .to_string();
+        }).to_string();
         state.send_to_all_near(enemy.x, enemy.y, 40.0, &combat_msg);
 
         if enemy.hp <= 0 {
             enemy.state = EnemyState::Dead;
             let xp_reward = enemy.xp_reward;
-            let _ex = enemy.x;
-            let _ey = enemy.y;
+            let ex = enemy.x;
+            let ey = enemy.y;
             let enemy_name = enemy.name.clone();
+            let enemy_level = enemy.level;
+            let zone_level = state.world.get_zone_level(ex, ey);
             drop(enemy);
 
-            // Award XP
+            // Generate loot
+            let loot = generate_loot(zone_level, enemy_level, lck);
+            let gold = enemy_gold_reward(zone_level, enemy_level);
+            let tick = state.tick_count.load(std::sync::atomic::Ordering::Relaxed) as f64;
+
+            // Drop items on ground
+            for item in &loot {
+                let ground_item = GroundItem {
+                    id: Uuid::new_v4(),
+                    item: item.clone(),
+                    x: ex + rng.gen_range(-1.0..1.0),
+                    y: ey + rng.gen_range(-1.0..1.0),
+                    owner_id: Some(attacker_id),
+                    drop_time: tick,
+                    protection_duration: 600.0, // 30 seconds at 20 tps
+                };
+                state.ground_items.insert(ground_item.id, ground_item);
+            }
+
+            // Award XP and gold
             if let Some(mut player) = state.players.get_mut(&attacker_id) {
                 player.xp += xp_reward;
+                player.gold += gold;
 
                 // Check level up
                 let xp_needed = player.xp_to_next_level();
                 if player.xp >= xp_needed {
                     player.level += 1;
                     player.xp -= xp_needed;
+                    player.pvp_protection = player.level < 10;
 
-                    // Apply stat gains with diminishing returns
                     let dim_factor = if player.level <= 50 {
                         1.0 - player.level as f64 * 0.005
                     } else {
@@ -458,84 +535,453 @@ fn handle_attack(state: &Arc<AppState>, attacker_id: Uuid, target_id: Uuid) {
                     let level_msg = json!({
                         "type": MSG_LEVEL_UP,
                         "payload": { "level": player.level }
-                    })
-                    .to_string();
+                    }).to_string();
                     state.send_to(&attacker_id, &level_msg);
 
-                    info!(
-                        "Player {} leveled up to {}!",
-                        player.username, player.level
-                    );
+                    info!("Player {} leveled up to {}!", player.username, player.level);
                 }
 
-                // Send stats update
-                let stats_msg = json!({
-                    "type": MSG_STATS_UPDATE,
-                    "payload": {
-                        "hp": player.hp,
-                        "maxHp": player.max_hp,
-                        "mp": player.mp,
-                        "maxMp": player.max_mp,
-                        "level": player.level,
-                        "xp": player.xp,
-                        "xpNeeded": player.xp_to_next_level(),
-                        "atk": player.atk,
-                        "def": player.def,
-                        "spd": player.spd,
-                        "lck": player.lck,
-                    }
-                })
-                .to_string();
-                state.send_to(&attacker_id, &stats_msg);
+                send_stats_update(state, &player);
             }
 
-            // Notify about kill
+            // Notify about kill and loot
+            let loot_names: Vec<String> = loot.iter().map(|i| i.name.clone()).collect();
             let kill_msg = json!({
                 "type": MSG_CHAT_MESSAGE,
                 "payload": {
                     "sender": "System",
-                    "text": format!("You defeated {}! (+{} XP)", enemy_name, xp_reward),
-                    "channel": "system"
+                    "text": format!("You defeated {}! (+{} XP, +{}g) Loot: {}", enemy_name, xp_reward, gold, loot_names.join(", ")),
+                    "channel": "combat"
                 }
-            })
-            .to_string();
+            }).to_string();
             state.send_to(&attacker_id, &kill_msg);
 
-            // Remove dead enemy, will respawn in game loop
+            // Notify nearby about ground items
+            broadcast_ground_items(state, ex, ey);
+
             state.enemies.remove(&target_id);
         }
     }
+}
+
+// ─── PvP Attack Handler ─────────────────────────────────────
+
+fn handle_pvp_attack(state: &Arc<AppState>, attacker_id: Uuid, target_id: Uuid) {
+    if attacker_id == target_id { return; }
+
+    let attacker_stats = {
+        let player = match state.players.get(&attacker_id) {
+            Some(p) => p,
+            None => return,
+        };
+        if player.dead { return; }
+        (player.total_atk(), player.level, player.x, player.y, player.total_lck(), player.username.clone())
+    };
+
+    let (atk, level, ax, ay, lck, attacker_name) = attacker_stats;
+
+    // Check target exists and is in range
+    let target_info = {
+        let target = match state.players.get(&target_id) {
+            Some(p) => p,
+            None => return,
+        };
+        if target.dead { return; }
+        if target.pvp_protection {
+            let msg = json!({
+                "type": MSG_CHAT_MESSAGE,
+                "payload": { "sender": "System", "text": "That player is under PvP protection (level < 10).", "channel": "system" }
+            }).to_string();
+            state.send_to(&attacker_id, &msg);
+            return;
+        }
+        let dist = ((target.x - ax).powi(2) + (target.y - ay).powi(2)).sqrt();
+        if dist > 3.0 { return; }
+        (target.total_def(), target.x, target.y, target.username.clone())
+    };
+
+    let (target_def, tx, ty, target_name) = target_info;
+
+    let mut rng = rand::thread_rng();
+
+    let raw_damage = atk as f64 * (0.9 + rng.r#gen::<f64>() * 0.2);
+    let def_reduction = target_def as f64 / (target_def as f64 + 100.0 + level as f64 * 2.0);
+    let crit_chance = 0.05 + lck as f64 * 0.001;
+    let is_crit = rng.r#gen::<f64>() < crit_chance;
+    let crit_mult = if is_crit { 1.5 } else { 1.0 };
+    let final_damage = (raw_damage * (1.0 - def_reduction) * crit_mult).max(1.0) as i32;
+
+    // Apply damage
+    let killed = {
+        let mut target = state.players.get_mut(&target_id).unwrap();
+        target.hp -= final_damage;
+        target.hp <= 0
+    };
+
+    let combat_msg = json!({
+        "type": MSG_COMBAT_EVENT,
+        "payload": {
+            "attackerId": attacker_id.to_string(),
+            "targetId": target_id.to_string(),
+            "damage": final_damage,
+            "isCrit": is_crit,
+        }
+    }).to_string();
+    state.send_to_all_near(tx, ty, 40.0, &combat_msg);
+
+    if killed {
+        // Handle PvP death
+        let (dropped_items, dropped_gold) = {
+            let mut target = state.players.get_mut(&target_id).unwrap();
+            target.dead = true;
+            target.hp = 0;
+            target.respawn_timer = 100.0; // 5 seconds at 20 tps
+            pvp_death_drops(&mut target)
+        };
+
+        let tick = state.tick_count.load(std::sync::atomic::Ordering::Relaxed) as f64;
+
+        // Drop items on ground
+        for item in &dropped_items {
+            let ground_item = GroundItem {
+                id: Uuid::new_v4(),
+                item: item.clone(),
+                x: tx + rng.gen_range(-1.5..1.5),
+                y: ty + rng.gen_range(-1.5..1.5),
+                owner_id: Some(target_id), // original owner has priority
+                drop_time: tick,
+                protection_duration: 600.0,
+            };
+            state.ground_items.insert(ground_item.id, ground_item);
+        }
+
+        // Give gold to killer
+        if let Some(mut attacker) = state.players.get_mut(&attacker_id) {
+            attacker.gold += dropped_gold;
+        }
+
+        // Death notification
+        let death_msg = json!({
+            "type": MSG_DEATH,
+            "payload": { "killedBy": attacker_name }
+        }).to_string();
+        state.send_to(&target_id, &death_msg);
+
+        // Kill feed
+        let kill_feed = json!({
+            "type": MSG_CHAT_MESSAGE,
+            "payload": {
+                "sender": "PvP",
+                "text": format!("{} killed {}! ({} items dropped)", attacker_name, target_name, dropped_items.len()),
+                "channel": "combat"
+            }
+        }).to_string();
+        state.send_to_all_near(tx, ty, 50.0, &kill_feed);
+
+        broadcast_ground_items(state, tx, ty);
+        send_inventory_update(state, &target_id);
+    }
+}
+
+// ─── Item Pickup Handler ─────────────────────────────────────
+
+fn handle_pickup_item(state: &Arc<AppState>, player_id: Uuid, item_id: Uuid) {
+    let player_pos = {
+        let p = match state.players.get(&player_id) {
+            Some(p) => p,
+            None => return,
+        };
+        (p.x, p.y)
+    };
+
+    let tick = state.tick_count.load(std::sync::atomic::Ordering::Relaxed) as f64;
+
+    if let Some(ground_item) = state.ground_items.get(&item_id) {
+        let dist = ((ground_item.x - player_pos.0).powi(2) + (ground_item.y - player_pos.1).powi(2)).sqrt();
+        if dist > 2.0 { return; }
+
+        // Check ownership protection
+        if let Some(owner_id) = ground_item.owner_id {
+            if owner_id != player_id && (tick - ground_item.drop_time) < ground_item.protection_duration {
+                let msg = json!({
+                    "type": MSG_CHAT_MESSAGE,
+                    "payload": { "sender": "System", "text": "This item is protected. Wait for protection to expire.", "channel": "system" }
+                }).to_string();
+                state.send_to(&player_id, &msg);
+                return;
+            }
+        }
+
+        let item = ground_item.item.clone();
+        drop(ground_item);
+
+        // Try to add to inventory
+        if let Some(mut player) = state.players.get_mut(&player_id) {
+            if player.add_item(item.clone()) {
+                state.ground_items.remove(&item_id);
+
+                let pickup_msg = json!({
+                    "type": MSG_ITEM_DROP,
+                    "payload": { "itemName": item.name, "rarity": item.rarity }
+                }).to_string();
+                state.send_to(&player_id, &pickup_msg);
+
+                send_inventory_update(state, &player_id);
+                broadcast_ground_items(state, player_pos.0, player_pos.1);
+            } else {
+                let msg = json!({
+                    "type": MSG_CHAT_MESSAGE,
+                    "payload": { "sender": "System", "text": "Inventory is full!", "channel": "system" }
+                }).to_string();
+                state.send_to(&player_id, &msg);
+            }
+        }
+    }
+}
+
+// ─── Equipment Handlers ─────────────────────────────────────
+
+fn handle_equip_item(state: &Arc<AppState>, player_id: Uuid, slot_index: usize) {
+    if let Some(mut player) = state.players.get_mut(&player_id) {
+        if slot_index >= player.inventory.len() { return; }
+
+        if let Some(item) = player.inventory[slot_index].take() {
+            if let Some(ref slot) = item.slot {
+                // Unequip existing item in that slot
+                if let Some(old_item) = player.equipment.remove(slot) {
+                    player.inventory[slot_index] = Some(old_item);
+                }
+                player.equipment.insert(slot.clone(), item);
+
+                drop(player);
+                send_stats_update_by_id(state, &player_id);
+                send_inventory_update(state, &player_id);
+            } else {
+                // Item is not equippable, put it back
+                player.inventory[slot_index] = Some(item);
+            }
+        }
+    }
+}
+
+fn handle_unequip_item(state: &Arc<AppState>, player_id: Uuid, slot: &str) {
+    if let Some(mut player) = state.players.get_mut(&player_id) {
+        if let Some(item) = player.equipment.remove(slot) {
+            if !player.add_item(item.clone()) {
+                // Inventory full, put it back
+                player.equipment.insert(slot.to_string(), item);
+                let msg = json!({
+                    "type": MSG_CHAT_MESSAGE,
+                    "payload": { "sender": "System", "text": "Inventory full! Cannot unequip.", "channel": "system" }
+                }).to_string();
+                state.send_to(&player_id, &msg);
+            } else {
+                drop(player);
+                send_stats_update_by_id(state, &player_id);
+                send_inventory_update(state, &player_id);
+            }
+        }
+    }
+}
+
+// ─── Bank Handlers ──────────────────────────────────────────
+
+fn handle_bank_deposit(state: &Arc<AppState>, player_id: Uuid, inv_slot: usize) {
+    // Check if player is near town center (bank NPC)
+    let near_bank = {
+        let p = match state.players.get(&player_id) {
+            Some(p) => p,
+            None => return,
+        };
+        let dist = (p.x * p.x + p.y * p.y).sqrt();
+        dist < 15.0 // Near town center
+    };
+
+    if !near_bank {
+        let msg = json!({
+            "type": MSG_CHAT_MESSAGE,
+            "payload": { "sender": "System", "text": "You must be near the bank to deposit items.", "channel": "system" }
+        }).to_string();
+        state.send_to(&player_id, &msg);
+        return;
+    }
+
+    if let Some(mut player) = state.players.get_mut(&player_id) {
+        if inv_slot >= player.inventory.len() { return; }
+
+        if let Some(item) = player.inventory[inv_slot].take() {
+            // Find empty bank slot
+            let bank_slot = player.bank.iter().position(|s| s.is_none());
+            if let Some(bank_idx) = bank_slot {
+                player.bank[bank_idx] = Some(item);
+                drop(player);
+                send_inventory_update(state, &player_id);
+                send_bank_update(state, &player_id);
+            } else {
+                // Bank full, put item back
+                player.inventory[inv_slot] = Some(item);
+                let msg = json!({
+                    "type": MSG_CHAT_MESSAGE,
+                    "payload": { "sender": "System", "text": "Bank is full!", "channel": "system" }
+                }).to_string();
+                state.send_to(&player_id, &msg);
+            }
+        }
+    }
+}
+
+fn handle_bank_withdraw(state: &Arc<AppState>, player_id: Uuid, bank_slot: usize) {
+    let near_bank = {
+        let p = match state.players.get(&player_id) {
+            Some(p) => p,
+            None => return,
+        };
+        (p.x * p.x + p.y * p.y).sqrt() < 15.0
+    };
+
+    if !near_bank {
+        let msg = json!({
+            "type": MSG_CHAT_MESSAGE,
+            "payload": { "sender": "System", "text": "You must be near the bank to withdraw items.", "channel": "system" }
+        }).to_string();
+        state.send_to(&player_id, &msg);
+        return;
+    }
+
+    if let Some(mut player) = state.players.get_mut(&player_id) {
+        if bank_slot >= player.bank.len() { return; }
+
+        if let Some(item) = player.bank[bank_slot].take() {
+            if player.add_item(item.clone()) {
+                drop(player);
+                send_inventory_update(state, &player_id);
+                send_bank_update(state, &player_id);
+            } else {
+                // Inventory full, put back
+                player.bank[bank_slot] = Some(item);
+                let msg = json!({
+                    "type": MSG_CHAT_MESSAGE,
+                    "payload": { "sender": "System", "text": "Inventory is full!", "channel": "system" }
+                }).to_string();
+                state.send_to(&player_id, &msg);
+            }
+        }
+    }
+}
+
+// ─── Helper Functions ───────────────────────────────────────
+
+fn send_stats_update(state: &Arc<AppState>, player: &PlayerData) {
+    let stats_msg = json!({
+        "type": MSG_STATS_UPDATE,
+        "payload": {
+            "hp": player.hp,
+            "maxHp": player.max_hp,
+            "mp": player.mp,
+            "maxMp": player.max_mp,
+            "level": player.level,
+            "xp": player.xp,
+            "xpNeeded": player.xp_to_next_level(),
+            "atk": player.total_atk(),
+            "def": player.total_def(),
+            "spd": player.spd,
+            "lck": player.total_lck(),
+            "gold": player.gold,
+        }
+    }).to_string();
+    state.send_to(&player.id, &stats_msg);
+}
+
+fn send_stats_update_by_id(state: &Arc<AppState>, player_id: &Uuid) {
+    if let Some(player) = state.players.get(player_id) {
+        send_stats_update(state, &player);
+    }
+}
+
+fn send_inventory_update(state: &Arc<AppState>, player_id: &Uuid) {
+    if let Some(player) = state.players.get(player_id) {
+        let inv_msg = json!({
+            "type": MSG_INVENTORY_UPDATE,
+            "payload": {
+                "items": player.inventory_payload(),
+                "equipment": player.equipment.iter().map(|(slot, item)| {
+                    json!({ "slot": slot, "item": item.to_json(0) })
+                }).collect::<Vec<_>>(),
+                "gold": player.gold,
+            }
+        }).to_string();
+        state.send_to(player_id, &inv_msg);
+    }
+}
+
+fn send_bank_update(state: &Arc<AppState>, player_id: &Uuid) {
+    if let Some(player) = state.players.get(player_id) {
+        let bank_msg = json!({
+            "type": MSG_BANK_UPDATE,
+            "payload": { "items": player.bank_payload() }
+        }).to_string();
+        state.send_to(player_id, &bank_msg);
+    }
+}
+
+fn broadcast_ground_items(state: &Arc<AppState>, x: f64, y: f64) {
+    let items: Vec<serde_json::Value> = state.ground_items.iter()
+        .filter(|gi| {
+            let dist = ((gi.x - x).powi(2) + (gi.y - y).powi(2)).sqrt();
+            dist < 30.0
+        })
+        .map(|gi| json!({
+            "id": gi.id.to_string(),
+            "name": gi.item.name,
+            "rarity": gi.item.rarity,
+            "x": gi.x,
+            "y": gi.y,
+        }))
+        .collect();
+
+    let msg = json!({
+        "type": MSG_GROUND_ITEMS,
+        "payload": { "items": items }
+    }).to_string();
+    state.send_to_all_near(x, y, 30.0, &msg);
 }
 
 // ─── Game Loop ───────────────────────────────────────────────
 
 async fn game_loop(state: Arc<AppState>) {
     let tick_duration = Duration::from_millis(50); // 20 ticks/sec
-    let mut tick_count: u64 = 0;
 
     loop {
         let tick_start = tokio::time::Instant::now();
-        tick_count += 1;
+        let tick = state.tick_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         // 1. Move players toward their targets
         update_player_movement(&state);
 
-        // 2. Update enemy AI (every 3 ticks for performance)
-        if tick_count % 3 == 0 {
+        // 2. Handle dead player respawns
+        update_dead_players(&state);
+
+        // 3. Enemy AI attacks players
+        if tick % 3 == 0 {
             update_enemies(&state);
+            process_enemy_attacks(&state);
         }
 
-        // 3. Broadcast entity states (every 2 ticks)
-        if tick_count % 2 == 0 {
+        // 4. Broadcast entity states (every 2 ticks)
+        if tick % 2 == 0 {
             broadcast_entity_updates(&state);
         }
 
-        // 4. Respawn enemies (every 200 ticks = 10 seconds)
-        if tick_count % 200 == 0 {
+        // 5. Respawn enemies (every 200 ticks = 10 seconds)
+        if tick % 200 == 0 {
             respawn_enemies(&state);
         }
 
-        // Sleep until next tick
+        // 6. Clean up old ground items (every 100 ticks = 5 seconds)
+        if tick % 100 == 0 {
+            cleanup_ground_items(&state, tick as f64);
+        }
+
         let elapsed = tick_start.elapsed();
         if elapsed < tick_duration {
             tokio::time::sleep(tick_duration - elapsed).await;
@@ -548,6 +994,8 @@ fn update_player_movement(state: &Arc<AppState>) {
 
     for mut entry in state.players.iter_mut() {
         let player = entry.value_mut();
+        if player.dead { continue; }
+
         let dx = player.target_x - player.x;
         let dy = player.target_y - player.y;
         let dist = (dx * dx + dy * dy).sqrt();
@@ -560,6 +1008,105 @@ fn update_player_movement(state: &Arc<AppState>) {
             player.x = player.target_x;
             player.y = player.target_y;
         }
+    }
+}
+
+fn update_dead_players(state: &Arc<AppState>) {
+    let mut to_respawn = Vec::new();
+
+    for mut entry in state.players.iter_mut() {
+        let player = entry.value_mut();
+        if player.dead {
+            player.respawn_timer -= 1.0;
+            if player.respawn_timer <= 0.0 {
+                to_respawn.push(player.id);
+                player.dead = false;
+                player.hp = player.max_hp / 2; // Respawn with 50% HP
+                player.mp = player.max_mp / 2;
+                player.x = 0.0; // Respawn at town center
+                player.y = 0.0;
+                player.target_x = 0.0;
+                player.target_y = 0.0;
+            }
+        }
+    }
+
+    for pid in to_respawn {
+        let respawn_msg = json!({
+            "type": MSG_RESPAWN,
+            "payload": { "x": 0, "y": 0 }
+        }).to_string();
+        state.send_to(&pid, &respawn_msg);
+
+        send_stats_update_by_id(state, &pid);
+    }
+}
+
+fn process_enemy_attacks(state: &Arc<AppState>) {
+    let mut attacks: Vec<(Uuid, Uuid, i32)> = Vec::new(); // (enemy_id, player_id, damage)
+
+    for entry in state.enemies.iter() {
+        let enemy = entry.value();
+        if enemy.state == EnemyState::Attack {
+            if let Some(target_id) = enemy.target_player {
+                if let Some(player) = state.players.get(&target_id) {
+                    if !player.dead {
+                        let raw_damage = enemy.atk as f64 * (0.9 + rand::random::<f64>() * 0.2);
+                        let def = player.total_def();
+                        let def_reduction = def as f64 / (def as f64 + 100.0 + enemy.level as f64 * 2.0);
+                        let final_damage = (raw_damage * (1.0 - def_reduction)).max(1.0) as i32;
+                        attacks.push((enemy.id, target_id, final_damage));
+                    }
+                }
+            }
+        }
+    }
+
+    for (enemy_id, player_id, damage) in attacks {
+        let killed = if let Some(mut player) = state.players.get_mut(&player_id) {
+            player.hp -= damage;
+            player.hp <= 0
+        } else {
+            false
+        };
+
+        let combat_msg = json!({
+            "type": MSG_COMBAT_EVENT,
+            "payload": {
+                "attackerId": enemy_id.to_string(),
+                "targetId": player_id.to_string(),
+                "damage": damage,
+                "isCrit": false,
+            }
+        }).to_string();
+        state.send_to(&player_id, &combat_msg);
+
+        if killed {
+            if let Some(mut player) = state.players.get_mut(&player_id) {
+                player.dead = true;
+                player.hp = 0;
+                player.respawn_timer = 100.0;
+            }
+            let death_msg = json!({
+                "type": MSG_DEATH,
+                "payload": {}
+            }).to_string();
+            state.send_to(&player_id, &death_msg);
+        } else {
+            send_stats_update_by_id(state, &player_id);
+        }
+    }
+}
+
+fn cleanup_ground_items(state: &Arc<AppState>, current_tick: f64) {
+    let max_age = 6000.0; // 5 minutes at 20 tps
+    let to_remove: Vec<Uuid> = state.ground_items.iter()
+        .filter(|gi| (current_tick - gi.drop_time) > max_age)
+        .map(|gi| gi.id)
+        .collect();
+
+    for id in to_remove {
+        state.ground_items.remove(&id);
     }
 }
 
@@ -632,7 +1179,6 @@ fn respawn_enemies(state: &Arc<AppState>) {
     if current_count < target_count {
         let to_spawn = target_count - current_count;
         let mut rng = rand::thread_rng();
-        use rand::Rng;
 
         for _ in 0..to_spawn {
             let cx: i32 = rng.gen_range(-3..=3);
