@@ -48,3 +48,6 @@ warning: `realmforge-server` (bin "realmforge-server") generated 5 warnings (run
 [2m2026-04-08T11:10:15.180111Z[0m [32m INFO[0m [2mrealmforge_server[0m[2m:[0m Spawned 440 initial enemies
 [2m2026-04-08T11:10:15.181208Z[0m [32m INFO[0m [2mrealmforge_server[0m[2m:[0m 🏰 RealmForge server starting on 0.0.0.0:8080
 [2m2026-04-08T11:10:15.181270Z[0m [32m INFO[0m [2mrealmforge_server[0m[2m:[0m    WebSocket endpoint: ws://0.0.0.0:8080/ws
+[2m2026-04-08T11:20:01.803322Z[0m [32m INFO[0m [2mrealmforge_server[0m[2m:[0m Auto-registered: test
+[2m2026-04-08T11:20:01.805116Z[0m [32m INFO[0m [2mrealmforge_server[0m[2m:[0m New character created for: test
+[2m2026-04-08T11:20:01.880927Z[0m [32m INFO[0m [2mrealmforge_server[0m[2m:[0m Player test (3449c890-15e1-4db1-b6bb-e740aab15db4) joined. Total players: 1

@@ -115,6 +115,10 @@ export class GameScene extends Phaser.Scene {
   private attackAura!: Phaser.GameObjects.Graphics;
   private pickupAura!: Phaser.GameObjects.Graphics;
 
+  // UI panel interactive overlays (scene-level rects that bypass Container hit-testing bug)
+  private uiOverlays: Phaser.GameObjects.Rectangle[] = [];
+  private uiClickedThisFrame = false;
+
   constructor() {
     super({ key: 'GameScene' });
   }
@@ -213,15 +217,27 @@ export class GameScene extends Phaser.Scene {
       this.network.send(MessageType.UseItem, { action: 'buy', listingId: listing.id });
     });
 
+    // --- UI Panel Interactive Overlays ---
+    // Scene-level invisible rects with setScrollFactor(0)+setInteractive() bypass
+    // the Phaser 3 bug where Container children lose correct hit testing when camera scrolls.
+    // These are NOT inside any Container — they are direct scene objects, same pattern as Tutorial.
+    this.createPanelOverlay(910, 60, 356, 254, this.inventoryUI);    // Inventory (8×5 grid)
+    this.createPanelOverlay(730, 60, 165, 280, this.equipmentUI);    // Equipment
+    this.createPanelOverlay(440, 100, 393, 345, this.bankUI);        // Bank (10×8 grid)
+    this.createPanelOverlay(490, 100, 300, 260, this.craftingUI);    // Crafting
+    this.createPanelOverlay(440, 80, 400, 300, this.marketplaceUI);  // Marketplace
+
     // --- Input handling ---
     this.input.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
-      if (pointer.rightButtonDown() || this.isDead || this.tutorial?.isActive()) return;
-
-      // Route clicks to UI panels if pointer is over one
-      if (this.isPointerOverUI(pointer)) {
-        this.handleUIClick(pointer.x, pointer.y);
+      // If a UI overlay already handled this click, consume and reset
+      if (this.uiClickedThisFrame) {
+        this.uiClickedThisFrame = false;
         return;
       }
+      if (pointer.rightButtonDown() || this.isDead || this.tutorial?.isActive()) return;
+
+      // Block clicks on non-interactive UI areas (chat, stats, minimap)
+      if (this.isPointerOverUI(pointer)) return;
 
       const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
       const gridPos = screenToWorld(worldPoint.x, worldPoint.y);
@@ -312,6 +328,12 @@ export class GameScene extends Phaser.Scene {
   }
 
   update(_time: number, delta: number): void {
+    // Sync UI overlay interactivity with panel visibility
+    for (const overlay of this.uiOverlays) {
+      const panel = (overlay as any).__panel as { isVisible(): boolean };
+      if (overlay.input) overlay.input.enabled = panel.isVisible();
+    }
+
     // Constant-speed movement: tiles per millisecond
     const moveStep = PLAYER_SPEED * (delta / 1000);
     // Remote entity interpolation uses proportional lerp (smoother for network entities)
@@ -853,46 +875,54 @@ export class GameScene extends Phaser.Scene {
     this.pickupAura.strokeEllipse(sx, sy, pickupRange * TILE_WIDTH, pickupRange * TILE_HEIGHT);
   }
 
+  /** Create an invisible interactive rect on the scene (not in a Container) for a UI panel.
+   *  This bypasses the Phaser 3 Container+scrollFactor(0) hit-testing bug. */
+  private createPanelOverlay(
+    x: number, y: number, w: number, h: number,
+    panel: { handleScreenClick(rx: number, ry: number): boolean; isVisible(): boolean }
+  ): void {
+    const overlay = this.add.rectangle(x + w / 2, y + h / 2, w, h, 0x000000, 0)
+      .setScrollFactor(0)
+      .setDepth(3999)
+      .setInteractive();
+    (overlay as any).__panel = panel;
+    overlay.on('pointerdown', (_pointer: Phaser.Input.Pointer) => {
+      if (!panel.isVisible()) return;
+      const relX = _pointer.x - x;
+      const relY = _pointer.y - y;
+      console.log(`[Overlay] click on panel at rel(${relX}, ${relY})`);
+      panel.handleScreenClick(relX, relY);
+      this.uiClickedThisFrame = true;
+    });
+    // Start disabled; synced in update() based on panel visibility
+    if (overlay.input) overlay.input.enabled = false;
+    this.uiOverlays.push(overlay);
+  }
+
   /** Screen-space check: is pointer over any visible UI panel? */
   private isPointerOverUI(pointer: Phaser.Input.Pointer): boolean {
     const sx = pointer.x;
     const sy = pointer.y;
-    // Define bounds for each panel: [x, y, w, h, visibleFn]
-    const panels: [number, number, number, number, () => boolean][] = [
-      [910, 60, 348, 255, () => this.inventoryUI.isVisible()],
-      [730, 60, 165, 280, () => this.equipmentUI.isVisible()],
-      [440, 100, 373, 341, () => this.bankUI.isVisible()],
-      [490, 100, 300, 260, () => this.craftingUI.isVisible()],
-      [440, 80, 400, 300, () => this.marketplaceUI.isVisible()],
-      [10, 476, 360, 224, () => true], // chatBox always visible
-      [10, 28, 160, 55, () => true],   // statsUI always visible
+
+    // Check overlay-backed panels first (overlays handle clicks, but we still block movement)
+    for (const overlay of this.uiOverlays) {
+      const panel = (overlay as any).__panel as { isVisible(): boolean };
+      if (panel.isVisible() && sx >= overlay.x && sx <= overlay.x + overlay.width && sy >= overlay.y && sy <= overlay.y + overlay.height) {
+        return true;
+      }
+    }
+
+    // Non-interactive UI areas that just consume clicks (no routing needed)
+    const staticUI: [number, number, number, number][] = [
+      [10, 476, 360, 224], // chatBox always visible
+      [10, 28, 160, 55],   // statsUI always visible
     ];
-    for (const [px, py, pw, ph, vis] of panels) {
-      if (vis() && sx >= px && sx <= px + pw && sy >= py && sy <= py + ph) {
+    for (const [px, py, pw, ph] of staticUI) {
+      if (sx >= px && sx <= px + pw && sy >= py && sy <= py + ph) {
         return true;
       }
     }
     return false;
-  }
-
-  /** Route a screen-space click to the correct UI panel's handleScreenClick. */
-  private handleUIClick(screenX: number, screenY: number): void {
-    // Check each panel in depth order (highest first for overlap)
-    const panelMap: Array<{ x: number; y: number; w: number; h: number; vis: () => boolean; handler: (rx: number, ry: number) => boolean }> = [
-      { x: 440, y: 80, w: 400, h: 300, vis: () => this.marketplaceUI.isVisible(), handler: (rx, ry) => this.marketplaceUI.handleScreenClick(rx, ry) },
-      { x: 440, y: 100, w: 373, h: 341, vis: () => this.bankUI.isVisible(), handler: (rx, ry) => this.bankUI.handleScreenClick(rx, ry) },
-      { x: 490, y: 100, w: 300, h: 260, vis: () => this.craftingUI.isVisible(), handler: (rx, ry) => this.craftingUI.handleScreenClick(rx, ry) },
-      { x: 910, y: 60, w: 348, h: 255, vis: () => this.inventoryUI.isVisible(), handler: (rx, ry) => this.inventoryUI.handleScreenClick(rx, ry) },
-      { x: 730, y: 60, w: 165, h: 280, vis: () => this.equipmentUI.isVisible(), handler: (rx, ry) => this.equipmentUI.handleScreenClick(rx, ry) },
-    ];
-
-    for (const panel of panelMap) {
-      if (panel.vis() && screenX >= panel.x && screenX <= panel.x + panel.w && screenY >= panel.y && screenY <= panel.y + panel.h) {
-        panel.handler(screenX - panel.x, screenY - panel.y);
-        return;
-      }
-    }
-    // Click was over chatbox or stats — just consume it (no routing needed)
   }
 
   private handleEntityClick(entityId: string): void {

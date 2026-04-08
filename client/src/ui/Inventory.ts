@@ -146,6 +146,7 @@ export class InventoryUI {
 
   private handleSlotClick(index: number): void {
     const item = this.items[index];
+    console.log(`[Inventory] slot ${index} clicked, item:`, item?.name ?? 'empty');
     if (item && this.onItemClick) {
       this.onItemClick(item, index);
     }
