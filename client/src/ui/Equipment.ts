@@ -176,4 +176,24 @@ export class EquipmentUI {
 
   isVisible(): boolean { return this.visible; }
   destroy(): void { this.container.destroy(); }
+
+  /** Handle a screen-space click routed from GameScene (bypasses broken Container hit testing). */
+  handleScreenClick(relX: number, relY: number): boolean {
+    const panelW = 165;
+    // Close button: top-right
+    if (relX >= panelW - 20 && relY <= 18) {
+      this.toggle();
+      return true;
+    }
+    // Equipment slots
+    for (const slot of EQUIP_SLOTS) {
+      const sx = slot.x;
+      const sy = slot.y + 20;
+      if (relX >= sx && relX <= sx + SLOT_SIZE && relY >= sy && relY <= sy + SLOT_SIZE) {
+        this.handleSlotClick(slot.id);
+        return true;
+      }
+    }
+    return true; // consumed
+  }
 }

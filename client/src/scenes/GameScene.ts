@@ -102,6 +102,18 @@ export class GameScene extends Phaser.Scene {
   // Tutorial overlay
   private tutorial!: TutorialOverlay;
 
+  // WASD / Arrow key movement
+  private keyW!: Phaser.Input.Keyboard.Key;
+  private keyA!: Phaser.Input.Keyboard.Key;
+  private keyS!: Phaser.Input.Keyboard.Key;
+  private keyD!: Phaser.Input.Keyboard.Key;
+  private cursors!: Phaser.Types.Input.Keyboard.CursorKeys;
+  private lastMoveSendTime = 0;
+
+  // Auras (visual range indicators)
+  private attackAura!: Phaser.GameObjects.Graphics;
+  private pickupAura!: Phaser.GameObjects.Graphics;
+
   constructor() {
     super({ key: 'GameScene' });
   }
@@ -204,8 +216,11 @@ export class GameScene extends Phaser.Scene {
     this.input.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
       if (pointer.rightButtonDown() || this.isDead || this.tutorial?.isActive()) return;
 
-      // Don't process world clicks if pointer is over a UI panel
-      if (this.isPointerOverUI(pointer)) return;
+      // Route clicks to UI panels if pointer is over one
+      if (this.isPointerOverUI(pointer)) {
+        this.handleUIClick(pointer.x, pointer.y);
+        return;
+      }
 
       const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
       const gridPos = screenToWorld(worldPoint.x, worldPoint.y);
@@ -218,6 +233,9 @@ export class GameScene extends Phaser.Scene {
         this.handleEntityClick(clickedEntity);
         return;
       }
+
+      // Clear auto-attack target when clicking to move
+      this.selectedEntityId = null;
 
       // Move to clicked tile
       this.targetGridX = tileX;
@@ -238,17 +256,28 @@ export class GameScene extends Phaser.Scene {
       this.drawCursorHighlight(Math.round(gridPos.x), Math.round(gridPos.y));
     });
 
-    // Keyboard shortcuts
+    // Keyboard shortcuts (only when chat not focused)
     const keys = this.input.keyboard!;
-    keys.on('keydown-I', () => this.inventoryUI.toggle());
-    keys.on('keydown-E', () => this.equipmentUI.toggle());
-    keys.on('keydown-B', () => this.bankUI.toggle());
-    keys.on('keydown-C', () => this.craftingUI.toggle());
-    keys.on('keydown-M', () => this.marketplaceUI.toggle());
+    keys.on('keydown-I', () => { if (!this.chatBox.isFocused()) this.inventoryUI.toggle(); });
+    keys.on('keydown-E', () => { if (!this.chatBox.isFocused()) this.equipmentUI.toggle(); });
+    keys.on('keydown-B', () => { if (!this.chatBox.isFocused()) this.bankUI.toggle(); });
+    keys.on('keydown-C', () => { if (!this.chatBox.isFocused()) this.craftingUI.toggle(); });
+    keys.on('keydown-M', () => { if (!this.chatBox.isFocused()) this.marketplaceUI.toggle(); });
     keys.on('keydown-ESC', () => this.closeAllPanels());
 
+    // WASD + Arrow key references for movement polling
+    this.keyW = keys.addKey(Phaser.Input.Keyboard.KeyCodes.W, false);
+    this.keyA = keys.addKey(Phaser.Input.Keyboard.KeyCodes.A, false);
+    this.keyS = keys.addKey(Phaser.Input.Keyboard.KeyCodes.S, false);
+    this.keyD = keys.addKey(Phaser.Input.Keyboard.KeyCodes.D, false);
+    this.cursors = keys.createCursorKeys();
+
+    // Player auras (attack range + pickup range)
+    this.attackAura = this.add.graphics().setDepth(998);
+    this.pickupAura = this.add.graphics().setDepth(997);
+
     // Keyboard hints HUD bar (bottom of screen)
-    const hintsText = '  I: Inventory  |  E: Equipment  |  B: Bank  |  C: Craft  |  M: Market  |  ENTER: Chat  |  ESC: Close  ';
+    const hintsText = '  WASD/Arrows: Move  |  I: Inventory  |  E: Equipment  |  B: Bank  |  C: Craft  |  M: Market  |  ENTER: Chat  |  ESC: Close  ';
     const hintsBg = this.add.rectangle(GAME_WIDTH / 2, GAME_HEIGHT - 12, GAME_WIDTH, 24, 0x000000, 0.6)
       .setScrollFactor(0).setDepth(2500).setOrigin(0.5, 0.5);
     const hintsLabel = this.add.text(GAME_WIDTH / 2, GAME_HEIGHT - 12, hintsText, {
@@ -263,7 +292,7 @@ export class GameScene extends Phaser.Scene {
     this.requestChunksAround(0, 0);
 
     // Welcome messages
-    this.chatBox.addSystemMessage('Welcome to RealmForge! Click to move.');
+    this.chatBox.addSystemMessage('Welcome to RealmForge! Use WASD/Arrows or click to move. Auto-attack nearby enemies!');
     this.chatBox.addSystemMessage('Keys: I=Inventory E=Equipment B=Bank C=Craft M=Market');
     this.chatBox.addSystemMessage('Click enemies to attack. ENTER to chat. /tutorial to replay guide.');
 
@@ -291,7 +320,39 @@ export class GameScene extends Phaser.Scene {
       this.deathText.setText(`💀 YOU DIED\nRespawning in ${secs}s...`);
     }
 
-    // Interpolate player
+    // --- WASD / Arrow key movement ---
+    if (!this.isDead && !this.chatBox.isFocused()) {
+      let dx = 0;
+      let dy = 0;
+      if (this.keyW.isDown || this.cursors.up.isDown) dy -= 1;
+      if (this.keyS.isDown || this.cursors.down.isDown) dy += 1;
+      if (this.keyA.isDown || this.cursors.left.isDown) dx -= 1;
+      if (this.keyD.isDown || this.cursors.right.isDown) dx += 1;
+
+      if (dx !== 0 || dy !== 0) {
+        // Normalize diagonal movement
+        const len = Math.sqrt(dx * dx + dy * dy);
+        dx /= len;
+        dy /= len;
+
+        // Set target 2 tiles ahead in movement direction
+        const moveAhead = 2.0;
+        this.targetGridX = this.playerGridX + dx * moveAhead;
+        this.targetGridY = this.playerGridY + dy * moveAhead;
+
+        // Throttle network sends to ~10/sec
+        const now = _time;
+        if (now - this.lastMoveSendTime > 100) {
+          this.lastMoveSendTime = now;
+          this.moveSeq++;
+          this.network.send(MessageType.Move, {
+            targetX: this.targetGridX, targetY: this.targetGridY, seq: this.moveSeq,
+          });
+        }
+      }
+    }
+
+    // Interpolate player toward target
     this.playerGridX = Phaser.Math.Linear(this.playerGridX, this.targetGridX, speed);
     this.playerGridY = Phaser.Math.Linear(this.playerGridY, this.targetGridY, speed);
     const screenPos = worldToScreen(this.playerGridX, this.playerGridY);
@@ -299,6 +360,9 @@ export class GameScene extends Phaser.Scene {
     this.playerNameText.setPosition(screenPos.x, screenPos.y - 60);
     this.playerSprite.setDepth(screenPos.y + 1000);
     this.playerNameText.setDepth(screenPos.y + 1001);
+
+    // Draw player auras (attack range = 2 tiles, pickup range = 1.5 tiles)
+    this.drawPlayerAuras(screenPos.x, screenPos.y);
 
     // Coords display
     this.coordsText.setText(
@@ -333,23 +397,52 @@ export class GameScene extends Phaser.Scene {
     // Attack cooldown
     if (this.attackCooldown > 0) this.attackCooldown -= delta;
 
+    // Auto-attack: if no target selected, find nearest enemy in range
+    if (!this.selectedEntityId && this.attackCooldown <= 0 && !this.isDead) {
+      let nearestId: string | null = null;
+      let nearestDist = 2.5; // attack range (server uses 3.0, slightly less for latency margin)
+      this.entities.forEach((entity, id) => {
+        if (entity.entityType !== 'enemy') return;
+        if (entity.hp !== undefined && entity.hp <= 0) return;
+        const dist = Math.sqrt(
+          Math.pow(this.playerGridX - entity.gridX, 2) +
+          Math.pow(this.playerGridY - entity.gridY, 2)
+        );
+        if (dist < nearestDist) {
+          nearestDist = dist;
+          nearestId = id;
+        }
+      });
+      if (nearestId) {
+        this.selectedEntityId = nearestId;
+      }
+    }
+
     // Auto-attack selected target (skip while dead)
     if (this.selectedEntityId && this.attackCooldown <= 0 && !this.isDead) {
       const target = this.entities.get(this.selectedEntityId);
       if (target) {
-        const dist = Math.sqrt(
-          Math.pow(this.playerGridX - target.gridX, 2) +
-          Math.pow(this.playerGridY - target.gridY, 2)
-        );
-        if (dist < 2) {
-          if (target.entityType === 'enemy') {
-            this.network.send(MessageType.Attack, { targetId: this.selectedEntityId });
-          } else if (target.entityType === 'player') {
-            this.network.send(MessageType.AttackPlayer, { targetId: this.selectedEntityId });
+        if (target.hp !== undefined && target.hp <= 0) {
+          // Target is dead, clear selection
+          this.selectedEntityId = null;
+        } else {
+          const dist = Math.sqrt(
+            Math.pow(this.playerGridX - target.gridX, 2) +
+            Math.pow(this.playerGridY - target.gridY, 2)
+          );
+          if (dist < 2.5) {
+            if (target.entityType === 'enemy') {
+              this.network.send(MessageType.Attack, { targetId: this.selectedEntityId });
+            } else if (target.entityType === 'player') {
+              this.network.send(MessageType.AttackPlayer, { targetId: this.selectedEntityId });
+            }
+            this.attackCooldown = 1000;
+            this.showAttackEffect(target.sprite.x, target.sprite.y);
           }
-          this.attackCooldown = 1000;
-          this.showAttackEffect(target.sprite.x, target.sprite.y);
         }
+      } else {
+        // Target entity no longer exists
+        this.selectedEntityId = null;
       }
     }
 
@@ -396,8 +489,26 @@ export class GameScene extends Phaser.Scene {
         for (const entity of payload.entities) {
           seenIds.add(entity.id);
           if (entity.id === this.playerId) {
-            this.targetGridX = entity.x;
-            this.targetGridY = entity.y;
+            // Use server's target as our destination (prevents snap-back)
+            if (entity.targetX !== undefined && entity.targetY !== undefined) {
+              this.targetGridX = entity.targetX;
+              this.targetGridY = entity.targetY;
+            }
+            // Soft-correct current position toward server's authoritative position
+            // to prevent client/server drift without jarring teleports
+            const drift = Math.sqrt(
+              Math.pow(this.playerGridX - entity.x, 2) +
+              Math.pow(this.playerGridY - entity.y, 2)
+            );
+            if (drift > 3.0) {
+              // Large desync — hard snap to server position
+              this.playerGridX = entity.x;
+              this.playerGridY = entity.y;
+            } else if (drift > 0.3) {
+              // Small drift — gently pull toward server position
+              this.playerGridX = Phaser.Math.Linear(this.playerGridX, entity.x, 0.15);
+              this.playerGridY = Phaser.Math.Linear(this.playerGridY, entity.y, 0.15);
+            }
             if (entity.hp !== undefined) {
               this.playerStats.hp = entity.hp;
               this.playerStats.maxHp = entity.maxHp || 100;
@@ -671,6 +782,25 @@ export class GameScene extends Phaser.Scene {
     return null;
   }
 
+  /** Draw isometric ellipse auras around the player (attack + pickup ranges). */
+  private drawPlayerAuras(sx: number, sy: number): void {
+    this.attackAura.clear();
+    this.pickupAura.clear();
+    if (this.isDead) return;
+
+    // Isometric projection: x-radius = range * TILE_WIDTH/2, y-radius = range * TILE_HEIGHT/2
+    const attackRange = 2.5;
+    const pickupRange = 1.5;
+
+    // Attack aura (red, subtle)
+    this.attackAura.lineStyle(1, 0xff4444, 0.25);
+    this.attackAura.strokeEllipse(sx, sy, attackRange * TILE_WIDTH, attackRange * TILE_HEIGHT);
+
+    // Pickup/XP orb aura (green, subtle)
+    this.pickupAura.lineStyle(1, 0x44ff66, 0.3);
+    this.pickupAura.strokeEllipse(sx, sy, pickupRange * TILE_WIDTH, pickupRange * TILE_HEIGHT);
+  }
+
   /** Screen-space check: is pointer over any visible UI panel? */
   private isPointerOverUI(pointer: Phaser.Input.Pointer): boolean {
     const sx = pointer.x;
@@ -693,6 +823,26 @@ export class GameScene extends Phaser.Scene {
     return false;
   }
 
+  /** Route a screen-space click to the correct UI panel's handleScreenClick. */
+  private handleUIClick(screenX: number, screenY: number): void {
+    // Check each panel in depth order (highest first for overlap)
+    const panelMap: Array<{ x: number; y: number; w: number; h: number; vis: () => boolean; handler: (rx: number, ry: number) => boolean }> = [
+      { x: 440, y: 80, w: 400, h: 300, vis: () => this.marketplaceUI.isVisible(), handler: (rx, ry) => this.marketplaceUI.handleScreenClick(rx, ry) },
+      { x: 440, y: 100, w: 373, h: 341, vis: () => this.bankUI.isVisible(), handler: (rx, ry) => this.bankUI.handleScreenClick(rx, ry) },
+      { x: 490, y: 100, w: 300, h: 260, vis: () => this.craftingUI.isVisible(), handler: (rx, ry) => this.craftingUI.handleScreenClick(rx, ry) },
+      { x: 910, y: 60, w: 348, h: 255, vis: () => this.inventoryUI.isVisible(), handler: (rx, ry) => this.inventoryUI.handleScreenClick(rx, ry) },
+      { x: 730, y: 60, w: 165, h: 280, vis: () => this.equipmentUI.isVisible(), handler: (rx, ry) => this.equipmentUI.handleScreenClick(rx, ry) },
+    ];
+
+    for (const panel of panelMap) {
+      if (panel.vis() && screenX >= panel.x && screenX <= panel.x + panel.w && screenY >= panel.y && screenY <= panel.y + panel.h) {
+        panel.handler(screenX - panel.x, screenY - panel.y);
+        return;
+      }
+    }
+    // Click was over chatbox or stats — just consume it (no routing needed)
+  }
+
   private handleEntityClick(entityId: string): void {
     const entity = this.entities.get(entityId);
     if (!entity) return;
@@ -700,16 +850,15 @@ export class GameScene extends Phaser.Scene {
     if (entity.entityType === 'enemy') {
       this.selectedEntityId = entityId;
       this.chatBox.addMessage('Target', `Targeting: ${entity.nameText.text}`, 'combat');
-      // Immediate attack if in range
       const dist = Math.sqrt(
         Math.pow(this.playerGridX - entity.gridX, 2) +
         Math.pow(this.playerGridY - entity.gridY, 2)
       );
-      if (dist < 2 && this.attackCooldown <= 0) {
+      if (dist < 2.5 && this.attackCooldown <= 0) {
         this.network.send(MessageType.Attack, { targetId: entityId });
         this.attackCooldown = 1000;
         this.showAttackEffect(entity.sprite.x, entity.sprite.y);
-      } else if (dist >= 2) {
+      } else if (dist >= 2.5) {
         // Move toward enemy
         this.targetGridX = entity.gridX;
         this.targetGridY = entity.gridY;
@@ -727,11 +876,11 @@ export class GameScene extends Phaser.Scene {
           Math.pow(this.playerGridX - entity.gridX, 2) +
           Math.pow(this.playerGridY - entity.gridY, 2)
         );
-        if (dist < 2 && this.attackCooldown <= 0) {
+        if (dist < 2.5 && this.attackCooldown <= 0) {
           this.network.send(MessageType.AttackPlayer, { targetId: entityId });
           this.attackCooldown = 1000;
           this.showAttackEffect(entity.sprite.x, entity.sprite.y);
-        } else if (dist >= 2) {
+        } else if (dist >= 2.5) {
           this.targetGridX = entity.gridX;
           this.targetGridY = entity.gridY;
           this.moveSeq++;

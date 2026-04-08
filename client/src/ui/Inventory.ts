@@ -225,4 +225,26 @@ export class InventoryUI {
 
   isVisible(): boolean { return this.visible; }
   destroy(): void { this.container.destroy(); }
+
+  /** Handle a screen-space click routed from GameScene (bypasses broken Container hit testing). */
+  handleScreenClick(relX: number, relY: number): boolean {
+    // Close button: top-right area
+    const totalW = COLS * (SLOT_SIZE + PADDING) + PADDING;
+    if (relX >= totalW - 20 && relY <= 20) {
+      this.toggle();
+      return true;
+    }
+    // Slot grid
+    for (let row = 0; row < ROWS; row++) {
+      for (let col = 0; col < COLS; col++) {
+        const sx = PADDING + col * (SLOT_SIZE + PADDING);
+        const sy = 24 + row * (SLOT_SIZE + PADDING);
+        if (relX >= sx && relX <= sx + SLOT_SIZE && relY >= sy && relY <= sy + SLOT_SIZE) {
+          this.handleSlotClick(row * COLS + col);
+          return true;
+        }
+      }
+    }
+    return true; // consumed click even if no slot hit
+  }
 }

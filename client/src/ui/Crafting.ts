@@ -201,4 +201,29 @@ export class CraftingUI {
 
   isVisible(): boolean { return this.visible; }
   destroy(): void { this.container.destroy(); }
+
+  /** Handle a screen-space click routed from GameScene. */
+  handleScreenClick(relX: number, relY: number): boolean {
+    const panelW = 300;
+    // Close button
+    if (relX >= panelW - 20 && relY <= 20) {
+      this.toggle();
+      return true;
+    }
+    // Recipe list (left column, y starts at 36, each entry 16px tall)
+    if (relX < 140 && relY >= 36) {
+      const idx = Math.floor((relY - 36) / 16);
+      if (idx >= 0 && idx < this.recipes.length) {
+        this.selectRecipe(idx);
+        return true;
+      }
+    }
+    // Craft button area (bottom-right)
+    const panelH = 260;
+    if (relX >= 140 && relY >= panelH - 40) {
+      this.doCraft();
+      return true;
+    }
+    return true;
+  }
 }

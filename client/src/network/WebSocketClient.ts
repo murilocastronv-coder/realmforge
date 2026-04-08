@@ -60,6 +60,8 @@ export interface EntityState {
   entityType: 'player' | 'enemy' | 'npc' | 'item';
   x: number;
   y: number;
+  targetX?: number;
+  targetY?: number;
   hp?: number;
   maxHp?: number;
   level?: number;

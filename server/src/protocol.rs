@@ -100,6 +100,12 @@ pub struct EntityState {
     pub entity_type: String,
     pub x: f64,
     pub y: f64,
+    #[serde(rename = "targetX")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_x: Option<f64>,
+    #[serde(rename = "targetY")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_y: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hp: Option<i32>,
     #[serde(rename = "maxHp")]
@@ -186,6 +192,8 @@ impl PlayerData {
             id: self.id.to_string(),
             entity_type: "player".to_string(),
             x: self.x, y: self.y,
+            target_x: Some(self.target_x),
+            target_y: Some(self.target_y),
             hp: Some(self.hp),
             max_hp: Some(self.max_hp),
             level: Some(self.level),
@@ -336,6 +344,8 @@ impl EnemyData {
             entity_type: "enemy".to_string(),
             x: self.x,
             y: self.y,
+            target_x: None,
+            target_y: None,
             hp: Some(self.hp),
             max_hp: Some(self.max_hp),
             level: Some(self.level),

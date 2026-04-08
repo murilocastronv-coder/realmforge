@@ -140,4 +140,26 @@ export class BankUI {
 
   isVisible(): boolean { return this.visible; }
   destroy(): void { this.container.destroy(); }
+
+  /** Handle a screen-space click routed from GameScene. */
+  handleScreenClick(relX: number, relY: number): boolean {
+    const totalW = BANK_COLS * (SLOT_SIZE + PADDING) + PADDING;
+    // Close button
+    if (relX >= totalW - 20 && relY <= 20) {
+      this.toggle();
+      return true;
+    }
+    // Slot grid
+    for (let row = 0; row < BANK_ROWS; row++) {
+      for (let col = 0; col < BANK_COLS; col++) {
+        const sx = PADDING + col * (SLOT_SIZE + PADDING);
+        const sy = 26 + row * (SLOT_SIZE + PADDING);
+        if (relX >= sx && relX <= sx + SLOT_SIZE && relY >= sy && relY <= sy + SLOT_SIZE) {
+          this.handleSlotClick(row * BANK_COLS + col);
+          return true;
+        }
+      }
+    }
+    return true;
+  }
 }

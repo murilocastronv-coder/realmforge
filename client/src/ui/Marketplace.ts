@@ -197,4 +197,34 @@ export class MarketplaceUI {
 
   isVisible(): boolean { return this.visible; }
   destroy(): void { this.container.destroy(); }
+
+  /** Handle a screen-space click routed from GameScene. */
+  handleScreenClick(relX: number, relY: number): boolean {
+    const panelW = 400;
+    const panelH = 300;
+    // Close button
+    if (relX >= panelW - 20 && relY <= 20) {
+      this.toggle();
+      return true;
+    }
+    // Buy/Sell tabs
+    if (relY >= 20 && relY <= 38) {
+      if (relX >= 10 && relX <= 60) { this.setMode('buy'); return true; }
+      if (relX >= 70 && relX <= 130) { this.setMode('sell'); return true; }
+    }
+    // Listing rows (y starts at 56, each 16px tall)
+    if (relY >= 56 && relY < panelH - 65) {
+      const idx = Math.floor((relY - 56) / 16);
+      if (idx >= 0 && idx < this.listings.length) {
+        this.selectListing(idx);
+        return true;
+      }
+    }
+    // Action button (bottom-right)
+    if (relX >= panelW - 100 && relY >= panelH - 40) {
+      this.doAction();
+      return true;
+    }
+    return true;
+  }
 }

@@ -307,6 +307,8 @@ export class ChatBox {
     this.inputElement.style.fontSize = `${Math.max(9, Math.round(11 * scaleY))}px`;
   }
 
+  isFocused(): boolean { return this.inputActive; }
+
   destroy(): void {
     if (this.resizeHandler) {
       window.removeEventListener('resize', this.resizeHandler);
