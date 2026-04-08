@@ -3,10 +3,7 @@ import Phaser from 'phaser';
 interface TutorialStep {
   title: string;
   text: string;
-  /** Optional: wait for this key press before allowing "Next" */
   waitForKey?: string;
-  /** Optional: highlight a screen area {x, y, w, h} in scroll-factor-0 coords */
-  highlight?: { x: number; y: number; w: number; h: number };
 }
 
 const STEPS: TutorialStep[] = [
@@ -42,20 +39,20 @@ const STORAGE_KEY_PREFIX = 'realmforge_tutorial_done_';
 
 /**
  * TutorialOverlay — step-by-step new player guide.
- * Shows once per player (stored in localStorage keyed by playerId).
- * Can be re-triggered with /tutorial chat command.
+ * All elements are added directly to the scene (NOT in a Container)
+ * to avoid Phaser's scrollFactor container hit-testing bug.
  */
 export class TutorialOverlay {
   private scene: Phaser.Scene;
-  private container: Phaser.GameObjects.Container;
-  private backdrop: Phaser.GameObjects.Rectangle;
-  private panel: Phaser.GameObjects.Rectangle;
-  private titleText: Phaser.GameObjects.Text;
-  private bodyText: Phaser.GameObjects.Text;
-  private stepText: Phaser.GameObjects.Text;
-  private nextBtn: Phaser.GameObjects.Text;
-  private skipBtn: Phaser.GameObjects.Text;
-  private waitHint: Phaser.GameObjects.Text;
+  private elements: Phaser.GameObjects.GameObject[] = [];
+  private backdrop!: Phaser.GameObjects.Rectangle;
+  private panel!: Phaser.GameObjects.Rectangle;
+  private titleText!: Phaser.GameObjects.Text;
+  private bodyText!: Phaser.GameObjects.Text;
+  private stepText!: Phaser.GameObjects.Text;
+  private nextBtn!: Phaser.GameObjects.Text;
+  private skipBtn!: Phaser.GameObjects.Text;
+  private waitHint!: Phaser.GameObjects.Text;
   private currentStep = 0;
   private active = false;
   private keyListener?: (event: KeyboardEvent) => void;
@@ -65,87 +62,84 @@ export class TutorialOverlay {
   constructor(scene: Phaser.Scene, playerId: string) {
     this.scene = scene;
     this.playerId = playerId;
-    const width = 1280;  // GAME_WIDTH
-    const height = 720;  // GAME_HEIGHT
+    const W = 1280;
+    const H = 720;
+    const DEPTH = 8000;
 
-    this.container = scene.add.container(0, 0);
-    this.container.setScrollFactor(0);
-    this.container.setDepth(8000);
-    this.container.setVisible(false);
+    // Helper: add element, set scrollFactor(0), track for bulk show/hide
+    const add = <T extends Phaser.GameObjects.GameObject & { setScrollFactor(x: number): T; setDepth(d: number): T; setVisible(v: boolean): T }>(obj: T, depth = DEPTH): T => {
+      obj.setScrollFactor(0).setDepth(depth).setVisible(false);
+      this.elements.push(obj);
+      return obj;
+    };
 
-    // Dark backdrop — interactive to block clicks passing through to the game
-    this.backdrop = scene.add.rectangle(width / 2, height / 2, width + 100, height + 100, 0x000000, 0.55);
+    // Dark backdrop — blocks clicks passing through to the game world
+    this.backdrop = add(scene.add.rectangle(W / 2, H / 2, W + 200, H + 200, 0x000000, 0.55));
     this.backdrop.setInteractive();
-    this.container.add(this.backdrop);
 
     // Panel
     const pw = 420;
     const ph = 200;
-    const px = width / 2 - pw / 2;
-    const py = height / 2 - ph / 2 - 20;
+    const px = W / 2 - pw / 2;
+    const py = H / 2 - ph / 2 - 20;
 
-    this.panel = scene.add.rectangle(px, py, pw, ph, 0x111828, 0.95);
+    this.panel = add(scene.add.rectangle(px, py, pw, ph, 0x111828, 0.95), DEPTH + 1);
     this.panel.setOrigin(0, 0);
     this.panel.setStrokeStyle(2, 0x4488ff);
-    this.container.add(this.panel);
 
     // Title
-    this.titleText = scene.add.text(px + pw / 2, py + 16, '', {
+    this.titleText = add(scene.add.text(px + pw / 2, py + 16, '', {
       fontSize: '16px', color: '#f0c040', fontStyle: 'bold',
       stroke: '#000', strokeThickness: 3,
-    }).setOrigin(0.5, 0);
-    this.container.add(this.titleText);
+    }).setOrigin(0.5, 0), DEPTH + 2);
 
     // Body
-    this.bodyText = scene.add.text(px + pw / 2, py + 52, '', {
+    this.bodyText = add(scene.add.text(px + pw / 2, py + 52, '', {
       fontSize: '12px', color: '#ccddee', lineSpacing: 6,
       align: 'center',
-    }).setOrigin(0.5, 0);
-    this.container.add(this.bodyText);
+    }).setOrigin(0.5, 0), DEPTH + 2);
 
     // Step counter
-    this.stepText = scene.add.text(px + 12, py + ph - 26, '', {
+    this.stepText = add(scene.add.text(px + 12, py + ph - 26, '', {
       fontSize: '9px', color: '#556677',
-    });
-    this.container.add(this.stepText);
+    }), DEPTH + 2);
 
-    // Wait hint (e.g., "Press I to continue...")
-    this.waitHint = scene.add.text(px + pw / 2, py + ph - 50, '', {
+    // Wait hint
+    this.waitHint = add(scene.add.text(px + pw / 2, py + ph - 50, '', {
       fontSize: '11px', color: '#88aacc', fontStyle: 'italic',
-    }).setOrigin(0.5, 0);
-    this.container.add(this.waitHint);
+    }).setOrigin(0.5, 0), DEPTH + 2);
 
-    // Next button
-    this.nextBtn = scene.add.text(px + pw - 80, py + ph - 30, 'Next ▶', {
+    // Next button — depth higher than backdrop so it wins hit test
+    this.nextBtn = add(scene.add.text(px + pw - 80, py + ph - 30, 'Next ▶', {
       fontSize: '13px', color: '#44ff88', fontStyle: 'bold',
-    }).setInteractive({ useHandCursor: true });
+      backgroundColor: '#223344', padding: { x: 8, y: 4 },
+    }), DEPTH + 3);
+    this.nextBtn.setInteractive({ useHandCursor: true });
     this.nextBtn.on('pointerdown', () => this.advance());
     this.nextBtn.on('pointerover', () => this.nextBtn.setColor('#88ffbb'));
     this.nextBtn.on('pointerout', () => this.nextBtn.setColor('#44ff88'));
-    this.container.add(this.nextBtn);
 
     // Skip button
-    this.skipBtn = scene.add.text(px + pw - 80, py + 8, 'Skip ✕', {
+    this.skipBtn = add(scene.add.text(px + pw - 80, py + 8, 'Skip ✕', {
       fontSize: '10px', color: '#888888',
-    }).setInteractive({ useHandCursor: true });
+      backgroundColor: '#1a1a2e', padding: { x: 6, y: 3 },
+    }), DEPTH + 3);
+    this.skipBtn.setInteractive({ useHandCursor: true });
     this.skipBtn.on('pointerdown', () => this.finish());
     this.skipBtn.on('pointerover', () => this.skipBtn.setColor('#cccccc'));
     this.skipBtn.on('pointerout', () => this.skipBtn.setColor('#888888'));
-    this.container.add(this.skipBtn);
   }
 
-  /** Start the tutorial if not already completed for this player */
   startIfNew(): void {
     const key = STORAGE_KEY_PREFIX + this.playerId;
     if (localStorage.getItem(key) === 'true') return;
     this.start();
   }
 
-  /** Force-start the tutorial (e.g., from /tutorial command) */
   start(): void {
     this.currentStep = 0;
     this.active = true;
-    this.container.setVisible(true);
+    this.setAllVisible(true);
     this.showStep();
   }
 
@@ -155,6 +149,12 @@ export class TutorialOverlay {
 
   isActive(): boolean {
     return this.active;
+  }
+
+  private setAllVisible(visible: boolean): void {
+    for (const el of this.elements) {
+      (el as any).setVisible(visible);
+    }
   }
 
   private showStep(): void {
@@ -172,7 +172,6 @@ export class TutorialOverlay {
       this.nextBtn.setVisible(true);
       this.waitHint.setVisible(false);
       this.clearKeyListener();
-      // Last step shows "Finish" instead of "Next"
       if (this.currentStep === STEPS.length - 1) {
         this.nextBtn.setText('Start Playing! ▶');
       } else {
@@ -192,7 +191,7 @@ export class TutorialOverlay {
 
   private finish(): void {
     this.active = false;
-    this.container.setVisible(false);
+    this.setAllVisible(false);
     this.clearKeyListener();
     localStorage.setItem(STORAGE_KEY_PREFIX + this.playerId, 'true');
     if (this.onComplete) this.onComplete();
@@ -203,7 +202,6 @@ export class TutorialOverlay {
     this.keyListener = (e: KeyboardEvent) => {
       if (e.key.toUpperCase() === key.toUpperCase()) {
         this.clearKeyListener();
-        // Small delay so the panel opens, then advance
         this.scene.time.delayedCall(300, () => this.advance());
       }
     };
@@ -219,6 +217,7 @@ export class TutorialOverlay {
 
   destroy(): void {
     this.clearKeyListener();
-    this.container.destroy();
+    for (const el of this.elements) el.destroy();
+    this.elements.length = 0;
   }
 }
