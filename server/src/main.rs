@@ -2,7 +2,7 @@ mod enemy;
 mod protocol;
 mod world;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 use rand::Rng;
@@ -25,6 +25,39 @@ use crate::enemy::{generate_enemy, update_enemy_ai};
 use crate::protocol::*;
 use crate::world::WorldGenerator;
 
+// ─── Spatial Hash Grid ───────────────────────────────────────
+
+const SPATIAL_CELL_SIZE: f64 = 16.0; // 16x16 tiles per cell
+
+fn spatial_key(x: f64, y: f64) -> (i32, i32) {
+    ((x / SPATIAL_CELL_SIZE).floor() as i32, (y / SPATIAL_CELL_SIZE).floor() as i32)
+}
+
+/// Returns the 9 cells around (and including) the cell at (x, y)
+fn nearby_cells(x: f64, y: f64) -> Vec<(i32, i32)> {
+    let (cx, cy) = spatial_key(x, y);
+    let mut cells = Vec::with_capacity(9);
+    for dx in -1..=1 {
+        for dy in -1..=1 {
+            cells.push((cx + dx, cy + dy));
+        }
+    }
+    cells
+}
+
+/// Extended nearby cells for a given range (in cells)
+fn nearby_cells_range(x: f64, y: f64, range: f64) -> Vec<(i32, i32)> {
+    let (cx, cy) = spatial_key(x, y);
+    let cell_range = (range / SPATIAL_CELL_SIZE).ceil() as i32;
+    let mut cells = Vec::with_capacity(((2 * cell_range + 1) * (2 * cell_range + 1)) as usize);
+    for dx in -cell_range..=cell_range {
+        for dy in -cell_range..=cell_range {
+            cells.push((cx + dx, cy + dy));
+        }
+    }
+    cells
+}
+
 // ─── Server State ────────────────────────────────────────────
 
 struct AppState {
@@ -46,6 +79,10 @@ struct AppState {
     tick_count: std::sync::atomic::AtomicU64,
     /// Broadcast channel for global messages
     broadcast_tx: broadcast::Sender<String>,
+    /// Spatial hash: cell -> set of player IDs in that cell
+    player_grid: DashMap<(i32, i32), Vec<Uuid>>,
+    /// Spatial hash: cell -> set of enemy IDs in that cell
+    enemy_grid: DashMap<(i32, i32), Vec<Uuid>>,
 }
 
 impl AppState {
@@ -61,6 +98,8 @@ impl AppState {
             ground_items: DashMap::new(),
             tick_count: std::sync::atomic::AtomicU64::new(0),
             broadcast_tx,
+            player_grid: DashMap::new(),
+            enemy_grid: DashMap::new(),
         }
     }
 
@@ -75,12 +114,46 @@ impl AppState {
     }
 
     fn send_to_all_near(&self, x: f64, y: f64, range: f64, msg: &str) {
+        // Use spatial grid for efficient proximity lookup
+        let cells = nearby_cells_range(x, y, range);
+        let range_sq = range * range;
+        let mut sent = HashSet::new();
+
+        for cell in cells {
+            if let Some(pids) = self.player_grid.get(&cell) {
+                for pid in pids.value() {
+                    if sent.contains(pid) { continue; }
+                    if let Some(player) = self.players.get(pid) {
+                        let dx = player.x - x;
+                        let dy = player.y - y;
+                        if dx * dx + dy * dy <= range_sq {
+                            self.send_to(pid, msg);
+                            sent.insert(*pid);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Rebuild spatial grids from current entity positions
+    fn update_spatial_grids(&self) {
+        // Clear and rebuild player grid
+        self.player_grid.clear();
         for entry in self.players.iter() {
             let player = entry.value();
-            let dist = ((player.x - x).powi(2) + (player.y - y).powi(2)).sqrt();
-            if dist <= range {
-                self.send_to(&player.id, msg);
-            }
+            if player.dead { continue; }
+            let key = spatial_key(player.x, player.y);
+            self.player_grid.entry(key).or_insert_with(Vec::new).push(player.id);
+        }
+
+        // Clear and rebuild enemy grid
+        self.enemy_grid.clear();
+        for entry in self.enemies.iter() {
+            let enemy = entry.value();
+            if enemy.state == EnemyState::Dead { continue; }
+            let key = spatial_key(enemy.x, enemy.y);
+            self.enemy_grid.entry(key).or_insert_with(Vec::new).push(enemy.id);
         }
     }
 }
@@ -410,6 +483,17 @@ fn get_or_generate_chunk(state: &Arc<AppState>, chunk_x: i32, chunk_y: i32) -> C
 
 fn handle_move(state: &Arc<AppState>, player_id: Uuid, payload: &MovePayload) {
     if let Some(mut player) = state.players.get_mut(&player_id) {
+        if player.dead { return; }
+
+        // Anti-cheat: limit move distance per request (max 30 tiles from current pos)
+        let dx = payload.target_x - player.x;
+        let dy = payload.target_y - player.y;
+        let dist = (dx * dx + dy * dy).sqrt();
+        if dist > 30.0 {
+            warn!("Player {} attempted move too far ({:.1} tiles)", player.username, dist);
+            return;
+        }
+
         player.target_x = payload.target_x;
         player.target_y = payload.target_y;
     }
@@ -1138,40 +1222,44 @@ fn update_enemies(state: &Arc<AppState>) {
 }
 
 fn broadcast_entity_updates(state: &Arc<AppState>) {
-    // Collect all entity states
-    let player_states: Vec<EntityState> = state
-        .players
-        .iter()
-        .map(|entry| entry.value().to_entity_state())
-        .collect();
+    // Update spatial grids first
+    state.update_spatial_grids();
 
-    let enemy_states: Vec<EntityState> = state
-        .enemies
-        .iter()
-        .filter(|e| e.value().state != EnemyState::Dead)
-        .map(|entry| entry.value().to_entity_state())
-        .collect();
+    let view_range = 50.0;
+    let view_range_sq = view_range * view_range;
 
-    // For each player, send entities near them (AOI)
+    // For each player, collect nearby entities using spatial grid
     for entry in state.players.iter() {
         let player = entry.value();
-        let view_range = 50.0; // tiles
+        let cells = nearby_cells_range(player.x, player.y, view_range);
 
         let mut visible: Vec<EntityState> = Vec::new();
 
-        // Other players in range
-        for ps in &player_states {
-            let dist = ((ps.x - player.x).powi(2) + (ps.y - player.y).powi(2)).sqrt();
-            if dist <= view_range {
-                visible.push(ps.clone());
+        for cell in &cells {
+            // Nearby players
+            if let Some(pids) = state.player_grid.get(cell) {
+                for pid in pids.value() {
+                    if let Some(other) = state.players.get(pid) {
+                        let dx = other.x - player.x;
+                        let dy = other.y - player.y;
+                        if dx * dx + dy * dy <= view_range_sq {
+                            visible.push(other.to_entity_state());
+                        }
+                    }
+                }
             }
-        }
 
-        // Enemies in range
-        for es in &enemy_states {
-            let dist = ((es.x - player.x).powi(2) + (es.y - player.y).powi(2)).sqrt();
-            if dist <= view_range {
-                visible.push(es.clone());
+            // Nearby enemies
+            if let Some(eids) = state.enemy_grid.get(cell) {
+                for eid in eids.value() {
+                    if let Some(enemy) = state.enemies.get(eid) {
+                        let dx = enemy.x - player.x;
+                        let dy = enemy.y - player.y;
+                        if dx * dx + dy * dy <= view_range_sq {
+                            visible.push(enemy.to_entity_state());
+                        }
+                    }
+                }
             }
         }
 
