@@ -79,14 +79,24 @@ type MessageHandler = (msg: GameMessage) => void;
 export class WebSocketClient {
   private ws: WebSocket | null = null;
   private handlers: Map<MessageType, MessageHandler[]> = new Map();
+  private statusListeners: Array<(status: 'connected' | 'disconnected' | 'reconnecting') => void> = [];
   private reconnectAttempts = 0;
-  private maxReconnectAttempts = 10;
+  private maxReconnectAttempts = 15;
   private reconnectDelay = 1000;
   private _connected = false;
   private messageQueue: GameMessage[] = [];
+  private lastAuthPayload: unknown = null;
 
   get connected(): boolean {
     return this._connected;
+  }
+
+  onStatusChange(listener: (status: 'connected' | 'disconnected' | 'reconnecting') => void): void {
+    this.statusListeners.push(listener);
+  }
+
+  private emitStatus(status: 'connected' | 'disconnected' | 'reconnecting'): void {
+    for (const l of this.statusListeners) l(status);
   }
 
   connect(): void {
@@ -97,6 +107,13 @@ export class WebSocketClient {
         console.log('[WS] Connected to server');
         this._connected = true;
         this.reconnectAttempts = 0;
+        this.emitStatus('connected');
+
+        // Re-auth on reconnect
+        if (this.lastAuthPayload) {
+          this.send(MessageType.Auth, this.lastAuthPayload);
+        }
+
         // Flush queued messages
         while (this.messageQueue.length > 0) {
           const msg = this.messageQueue.shift()!;
@@ -116,6 +133,7 @@ export class WebSocketClient {
       this.ws.onclose = () => {
         console.log('[WS] Disconnected');
         this._connected = false;
+        this.emitStatus('disconnected');
         this.tryReconnect();
       };
 
@@ -129,6 +147,10 @@ export class WebSocketClient {
   }
 
   send(type: MessageType, payload: unknown): void {
+    // Cache auth payload for reconnection
+    if (type === MessageType.Auth) {
+      this.lastAuthPayload = payload;
+    }
     if (!this._connected || !this.ws) {
       this.messageQueue.push({ type, payload });
       return;
@@ -164,11 +186,13 @@ export class WebSocketClient {
   private tryReconnect(): void {
     if (this.reconnectAttempts >= this.maxReconnectAttempts) {
       console.error('[WS] Max reconnect attempts reached');
+      this.emitStatus('disconnected');
       return;
     }
     this.reconnectAttempts++;
-    const delay = this.reconnectDelay * Math.pow(1.5, this.reconnectAttempts - 1);
-    console.log(`[WS] Reconnecting in ${Math.round(delay)}ms (attempt ${this.reconnectAttempts})`);
+    const delay = Math.min(this.reconnectDelay * Math.pow(1.5, this.reconnectAttempts - 1), 15000);
+    console.log(`[WS] Reconnecting in ${Math.round(delay)}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
+    this.emitStatus('reconnecting');
     setTimeout(() => this.connect(), delay);
   }
 

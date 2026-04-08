@@ -237,6 +237,9 @@ export class GameScene extends Phaser.Scene {
     this.chatBox.addSystemMessage('Welcome to RealmForge! Click to move.');
     this.chatBox.addSystemMessage('Keys: I=Inventory E=Equipment B=Bank C=Craft M=Market');
     this.chatBox.addSystemMessage('Click enemies to attack. ENTER to chat.');
+
+    // Connection status overlay
+    this.setupConnectionOverlay();
   }
 
   update(_time: number, delta: number): void {
@@ -663,45 +666,110 @@ export class GameScene extends Phaser.Scene {
   // --- Visual Effects ---
   private showLevelUpEffect(): void {
     const { x, y } = this.playerSprite;
+
+    // Text banner
     const text = this.add.text(x, y - 60, '⭐ LEVEL UP! ⭐', {
-      fontSize: '16px', color: '#ffdd00', stroke: '#000', strokeThickness: 3,
+      fontSize: '18px', color: '#ffdd00', stroke: '#000', strokeThickness: 4,
+      fontStyle: 'bold',
     }).setOrigin(0.5).setDepth(5000);
 
     this.tweens.add({
-      targets: text, y: y - 120, alpha: 0,
-      duration: 2000, ease: 'Power2',
+      targets: text, y: y - 130, alpha: 0,
+      duration: 2500, ease: 'Power2',
       onComplete: () => text.destroy(),
+    });
+
+    // Star particle burst
+    this.spawnParticleBurst(x, y - 20, 'particle_star', 0xffdd00, 18, 80, 1500);
+
+    // Golden ring expanding outward
+    const ring = this.add.circle(x, y, 5, 0xffdd00, 0.6).setDepth(4999);
+    this.tweens.add({
+      targets: ring, scaleX: 8, scaleY: 4, alpha: 0,
+      duration: 800, ease: 'Cubic.easeOut',
+      onComplete: () => ring.destroy(),
     });
   }
 
   private showDamageNumber(x: number, y: number, damage: number, isCrit: boolean): void {
     const color = isCrit ? '#ff4444' : '#ffffff';
-    const prefix = isCrit ? 'CRIT! ' : '';
-    const text = this.add.text(x, y, `${prefix}-${damage}`, {
-      fontSize: isCrit ? '14px' : '11px',
-      color, stroke: '#000', strokeThickness: 2,
+    const prefix = isCrit ? '💥 CRIT! ' : '';
+    const size = isCrit ? '16px' : '11px';
+    const text = this.add.text(x + Phaser.Math.Between(-10, 10), y, `${prefix}-${damage}`, {
+      fontSize: size, color, stroke: '#000', strokeThickness: 2,
+      fontStyle: isCrit ? 'bold' : 'normal',
     }).setOrigin(0.5).setDepth(6000);
 
+    // Bounce up then fall
     this.tweens.add({
       targets: text,
-      y: y - 40,
+      y: y - (isCrit ? 55 : 35),
       alpha: 0,
-      duration: 1200,
+      duration: isCrit ? 1500 : 1000,
       ease: 'Power2',
       onComplete: () => text.destroy(),
     });
+
+    // Blood splat for big hits
+    if (isCrit) {
+      this.spawnParticleBurst(x, y, 'particle_blood', 0xcc0000, 8, 30, 600);
+    }
   }
 
   private showAttackEffect(x: number, y: number): void {
     const slash = this.add.text(x, y - 12, '⚔️', {
-      fontSize: '16px',
+      fontSize: '18px',
     }).setOrigin(0.5).setDepth(5500);
 
     this.tweens.add({
-      targets: slash, alpha: 0, scale: 1.5,
-      duration: 400,
+      targets: slash, alpha: 0, scale: 1.8, rotation: 0.3,
+      duration: 350,
       onComplete: () => slash.destroy(),
     });
+
+    // Combat sparks
+    this.spawnParticleBurst(x, y - 8, 'particle_spark', 0xffffaa, 6, 25, 400);
+  }
+
+  private showLootPickupEffect(x: number, y: number, rarityColor: number): void {
+    this.spawnParticleBurst(x, y, 'particle_glow', rarityColor, 10, 40, 800);
+  }
+
+  private showDeathEffect(x: number, y: number): void {
+    // Skull emoji
+    const skull = this.add.text(x, y - 20, '💀', { fontSize: '24px' })
+      .setOrigin(0.5).setDepth(5500);
+    this.tweens.add({
+      targets: skull, y: y - 80, alpha: 0, scale: 1.5,
+      duration: 2000, ease: 'Power2',
+      onComplete: () => skull.destroy(),
+    });
+    // Red flash
+    this.spawnParticleBurst(x, y, 'particle_blood', 0xcc0000, 20, 50, 1000);
+  }
+
+  /** Spawn a burst of particles that fly outward and fade */
+  private spawnParticleBurst(
+    cx: number, cy: number, texture: string,
+    tint: number, count: number, radius: number, duration: number
+  ): void {
+    for (let i = 0; i < count; i++) {
+      const angle = (Math.PI * 2 * i) / count + Math.random() * 0.4;
+      const dist = radius * (0.5 + Math.random() * 0.5);
+      const p = this.add.image(cx, cy, texture)
+        .setTint(tint).setAlpha(0.9).setScale(0.5 + Math.random() * 0.5)
+        .setDepth(5800);
+      this.tweens.add({
+        targets: p,
+        x: cx + Math.cos(angle) * dist,
+        y: cy + Math.sin(angle) * dist * 0.5, // flatten for iso
+        alpha: 0,
+        scale: 0.1,
+        duration: duration * (0.7 + Math.random() * 0.6),
+        ease: 'Power2',
+        onComplete: () => p.destroy(),
+      });
+    }
   }
 
   // --- Utility ---
@@ -760,5 +828,32 @@ export class GameScene extends Phaser.Scene {
     this.cursorHighlight.lineTo(pos.x - hw, pos.y);
     this.cursorHighlight.closePath();
     this.cursorHighlight.strokePath();
+  }
+
+  private setupConnectionOverlay(): void {
+    const { width } = this.cameras.main;
+    const overlay = this.add.rectangle(width / 2, 0, 260, 28, 0x000000, 0.75)
+      .setScrollFactor(0).setDepth(10000).setOrigin(0.5, 0).setVisible(false);
+    const label = this.add.text(width / 2, 6, '', {
+      fontSize: '12px', color: '#ff6644', fontStyle: 'bold',
+    }).setScrollFactor(0).setDepth(10001).setOrigin(0.5, 0).setVisible(false);
+
+    this.network.onStatusChange((status) => {
+      if (status === 'connected') {
+        overlay.setVisible(false);
+        label.setVisible(false);
+        this.chatBox.addSystemMessage('✅ Reconnected to server.');
+      } else if (status === 'reconnecting') {
+        overlay.setVisible(true);
+        label.setVisible(true);
+        label.setText('⟳ Reconnecting to server...');
+        label.setColor('#ffaa44');
+      } else {
+        overlay.setVisible(true);
+        label.setVisible(true);
+        label.setText('⚠ Disconnected from server');
+        label.setColor('#ff4444');
+      }
+    });
   }
 }

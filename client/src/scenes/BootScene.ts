@@ -1,8 +1,22 @@
 import Phaser from 'phaser';
 import { TILE_WIDTH, TILE_HEIGHT } from '../utils/IsoMath';
 
+const TIPS = [
+  'Store valuables in the bank — items there are never lost on death!',
+  'Higher zones drop better loot. Venture far from town for riches!',
+  'Hold Shift and click a player to attack them (PvP).',
+  'Press B near the town center to access your bank.',
+  'Boss enemies (👑) drop the best loot but are extremely dangerous.',
+  'Your first 50 levels give the biggest stat boosts — plan wisely!',
+  'Players below level 10 are protected from PvP item drops.',
+  'Press I for Inventory, E for Equipment, C for Crafting.',
+  'Mythic items have special abilities — look for the red glow!',
+  'Dropped items have 30s owner priority before anyone can pick them up.',
+];
+
 /**
- * BootScene — loads all assets and shows a loading bar, then transitions to LoginScene.
+ * BootScene — loads all assets, shows a polished loading screen with tips,
+ * then transitions to LoginScene.
  */
 export class BootScene extends Phaser.Scene {
   constructor() {
@@ -10,38 +24,72 @@ export class BootScene extends Phaser.Scene {
   }
 
   preload(): void {
-    // Loading bar
     const { width, height } = this.cameras.main;
-    const barW = 320;
-    const barH = 20;
-    const barX = (width - barW) / 2;
-    const barY = height / 2;
 
-    const bg = this.add.rectangle(barX + barW / 2, barY, barW, barH, 0x333333);
-    const fill = this.add.rectangle(barX + 2, barY, 0, barH - 4, 0x00ff88);
-    fill.setOrigin(0, 0.5);
-    const label = this.add.text(width / 2, barY - 30, 'Loading...', {
-      fontSize: '14px', color: '#aaa',
+    // Background
+    this.cameras.main.setBackgroundColor(0x0a0e17);
+
+    // Title
+    this.add.text(width / 2, height / 2 - 100, '🏰 RealmForge', {
+      fontSize: '32px', color: '#f0c040', stroke: '#000', strokeThickness: 4,
+      fontStyle: 'bold',
     }).setOrigin(0.5);
+
+    this.add.text(width / 2, height / 2 - 65, 'Infinite Worlds. Endless Adventure.', {
+      fontSize: '12px', color: '#8899aa', fontStyle: 'italic',
+    }).setOrigin(0.5);
+
+    // Loading bar
+    const barW = 360;
+    const barH = 16;
+    const barY = height / 2;
+    const barX = (width - barW) / 2;
+
+    this.add.rectangle(barX + barW / 2, barY, barW + 4, barH + 4, 0x223344);
+    const bg = this.add.rectangle(barX + barW / 2, barY, barW, barH, 0x111822);
+    const fill = this.add.rectangle(barX + 2, barY, 0, barH - 4, 0x00cc66);
+    fill.setOrigin(0, 0.5);
+
+    const pctLabel = this.add.text(width / 2, barY, '0%', {
+      fontSize: '10px', color: '#ffffff',
+    }).setOrigin(0.5);
+
+    // Random tip
+    const tip = TIPS[Math.floor(Math.random() * TIPS.length)];
+    const tipText = this.add.text(width / 2, height / 2 + 50, `💡 ${tip}`, {
+      fontSize: '11px', color: '#7799bb', wordWrap: { width: 450 },
+      align: 'center',
+    }).setOrigin(0.5);
+
+    // Cycle tips every 3 seconds
+    this.time.addEvent({
+      delay: 3000, loop: true,
+      callback: () => {
+        const newTip = TIPS[Math.floor(Math.random() * TIPS.length)];
+        tipText.setText(`💡 ${newTip}`);
+      },
+    });
 
     this.load.on('progress', (value: number) => {
       fill.width = (barW - 4) * value;
+      pctLabel.setText(`${Math.floor(value * 100)}%`);
     });
     this.load.on('complete', () => {
-      bg.destroy();
-      fill.destroy();
-      label.destroy();
+      [bg, fill, pctLabel].forEach(o => o.destroy());
     });
 
-    // Generate isometric tile textures procedurally
+    // Generate all procedural textures
     this.generateTileTextures();
     this.generatePlayerTexture();
     this.generateEnemyTexture();
     this.generateItemDropTexture();
+    this.generateParticleTextures();
   }
 
   create(): void {
-    this.scene.start('LoginScene');
+    // Brief fade before transitioning
+    this.cameras.main.fadeOut(300, 0, 0, 0);
+    this.time.delayedCall(350, () => this.scene.start('LoginScene'));
   }
 
   private generateTileTextures(): void {
@@ -158,5 +206,54 @@ export class BootScene extends Phaser.Scene {
     gfx.fillPath();
     gfx.lineStyle(1, strokeColor, 0.4);
     gfx.strokePath();
+  }
+
+  private generateParticleTextures(): void {
+    // Spark particle (for combat)
+    const sparkGfx = this.add.graphics();
+    sparkGfx.fillStyle(0xffffff, 1);
+    sparkGfx.fillCircle(4, 4, 4);
+    sparkGfx.fillStyle(0xffffff, 0.5);
+    sparkGfx.fillCircle(4, 4, 2);
+    sparkGfx.generateTexture('particle_spark', 8, 8);
+    sparkGfx.destroy();
+
+    // Star particle (for level up)
+    const starGfx = this.add.graphics();
+    starGfx.fillStyle(0xffdd00, 1);
+    this.drawStar(starGfx, 6, 6, 5, 6, 3);
+    starGfx.generateTexture('particle_star', 12, 12);
+    starGfx.destroy();
+
+    // Glow particle (for loot)
+    const glowGfx = this.add.graphics();
+    glowGfx.fillStyle(0xffffff, 0.8);
+    glowGfx.fillCircle(6, 6, 6);
+    glowGfx.fillStyle(0xffffff, 0.3);
+    glowGfx.fillCircle(6, 6, 3);
+    glowGfx.generateTexture('particle_glow', 12, 12);
+    glowGfx.destroy();
+
+    // Blood particle (for damage)
+    const bloodGfx = this.add.graphics();
+    bloodGfx.fillStyle(0xcc0000, 1);
+    bloodGfx.fillCircle(3, 3, 3);
+    bloodGfx.generateTexture('particle_blood', 6, 6);
+    bloodGfx.destroy();
+  }
+
+  private drawStar(gfx: Phaser.GameObjects.Graphics, cx: number, cy: number, spikes: number, outerR: number, innerR: number): void {
+    let rot = (Math.PI / 2) * 3;
+    const step = Math.PI / spikes;
+    gfx.beginPath();
+    gfx.moveTo(cx, cy - outerR);
+    for (let i = 0; i < spikes; i++) {
+      gfx.lineTo(cx + Math.cos(rot) * outerR, cy + Math.sin(rot) * outerR);
+      rot += step;
+      gfx.lineTo(cx + Math.cos(rot) * innerR, cy + Math.sin(rot) * innerR);
+      rot += step;
+    }
+    gfx.closePath();
+    gfx.fillPath();
   }
 }
