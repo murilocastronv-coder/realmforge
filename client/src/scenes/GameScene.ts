@@ -11,6 +11,7 @@ import { CraftingUI } from '../ui/Crafting';
 import { MarketplaceUI } from '../ui/Marketplace';
 import { HealthBars } from '../ui/HealthBars';
 import { Minimap } from '../world/Minimap';
+import { TutorialOverlay } from '../ui/Tutorial';
 
 const TILE_KEYS: Record<number, string> = {
   0: 'tile_grass',
@@ -98,6 +99,9 @@ export class GameScene extends Phaser.Scene {
   // Ground items
   private groundItems: Map<string, { sprite: Phaser.GameObjects.Sprite; text: Phaser.GameObjects.Text }> = new Map();
 
+  // Tutorial overlay
+  private tutorial!: TutorialOverlay;
+
   constructor() {
     super({ key: 'GameScene' });
   }
@@ -161,8 +165,12 @@ export class GameScene extends Phaser.Scene {
     // Inventory (center-right, toggled)
     this.inventoryUI = new InventoryUI(this, GAME_WIDTH / 1.5 - 200, 180);
     this.inventoryUI.setOnItemClick((_item, index) => {
-      // Double-click/right-click to equip — send equip request
-      this.network.send(MessageType.EquipItem, { slot: index });
+      if (this.bankUI.isVisible()) {
+        // Bank is open — deposit item instead of equipping
+        this.network.send(MessageType.BankDeposit, { inventorySlot: index });
+      } else {
+        this.network.send(MessageType.EquipItem, { slotIndex: index });
+      }
     });
 
     // Equipment (center-left of inventory, toggled)
@@ -174,7 +182,7 @@ export class GameScene extends Phaser.Scene {
     // Bank (center, toggled)
     this.bankUI = new BankUI(this, GAME_WIDTH / 3 - 200, 120);
     this.bankUI.setOnWithdraw((_item, index) => {
-      this.network.send(MessageType.BankWithdraw, { slot: index });
+      this.network.send(MessageType.BankWithdraw, { bankSlot: index });
     });
 
     // Crafting (center, toggled)
@@ -251,7 +259,16 @@ export class GameScene extends Phaser.Scene {
     // Welcome messages
     this.chatBox.addSystemMessage('Welcome to RealmForge! Click to move.');
     this.chatBox.addSystemMessage('Keys: I=Inventory E=Equipment B=Bank C=Craft M=Market');
-    this.chatBox.addSystemMessage('Click enemies to attack. ENTER to chat.');
+    this.chatBox.addSystemMessage('Click enemies to attack. ENTER to chat. /tutorial to replay guide.');
+
+    // Tutorial overlay (shows once for new players)
+    this.tutorial = new TutorialOverlay(this, this.playerId);
+    this.tutorial.startIfNew();
+
+    // Register /tutorial chat command
+    this.chatBox.registerCommand('/tutorial', () => {
+      this.tutorial.start();
+    });
 
     // Connection status overlay
     this.setupConnectionOverlay();
@@ -623,14 +640,14 @@ export class GameScene extends Phaser.Scene {
         const color = this.RARITY_COLORS[item.rarity] ?? 0xffffff;
 
         const sprite = this.add.sprite(pos.x, pos.y, 'item_drop')
-          .setDepth(500)
+          .setDepth(pos.y - 5000)
           .setTint(color)
           .setInteractive({ useHandCursor: true });
 
         const text = this.add.text(pos.x, pos.y - 14, item.name, {
           fontSize: '8px', color: `#${color.toString(16).padStart(6, '0')}`,
           stroke: '#000000', strokeThickness: 2,
-        }).setOrigin(0.5).setDepth(501);
+        }).setOrigin(0.5).setDepth(pos.y - 4999);
 
         // Click to pick up
         sprite.on('pointerdown', () => {
@@ -837,7 +854,7 @@ export class GameScene extends Phaser.Scene {
     const hash = this.simpleHash(x, y);
     const distFromCenter = Math.sqrt(x * x + y * y);
 
-    if (distFromCenter < 8) return 7; // town
+    if (distFromCenter < 15) return 7; // town
     const waterNoise = this.simpleHash(x * 3, y * 3 + 1000) / 4294967296;
     if (waterNoise < 0.08) return 1; // water
 

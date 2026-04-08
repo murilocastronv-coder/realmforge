@@ -33,6 +33,7 @@ export class ChatBox {
   private visible = true;
   private minimized = false;
   private channelText!: Phaser.GameObjects.Text;
+  private commandHandlers: Map<string, () => void> = new Map();
 
   constructor(scene: Phaser.Scene, network: WebSocketClient, x: number, y: number) {
     this.scene = scene;
@@ -113,6 +114,10 @@ export class ChatBox {
     this.addMessage('System', text, 'system');
   }
 
+  registerCommand(command: string, handler: () => void): void {
+    this.commandHandlers.set(command, handler);
+  }
+
   private setChannel(channel: string): void {
     this.currentChannel = channel;
     this.channelText.setText(`[${channel}]`);
@@ -180,10 +185,16 @@ export class ChatBox {
           }
           return;
         case '/help':
-          this.addSystemMessage('Commands: /g /l /t /w <player> <msg> /help');
+          this.addSystemMessage('Commands: /g /l /t /w <player> <msg> /tutorial /help');
           return;
-        default:
+        default: {
+          const handler = this.commandHandlers.get(cmd);
+          if (handler) {
+            handler();
+            return;
+          }
           break;
+        }
       }
     }
 

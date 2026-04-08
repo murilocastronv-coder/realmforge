@@ -93,7 +93,7 @@ export class Minimap {
 
   private getTileColor(x: number, y: number): number {
     const dist = Math.sqrt(x * x + y * y);
-    if (dist < 8) return 0x9a8a7a; // town
+    if (dist < 15) return 0x9a8a7a; // town
 
     let h = (x * 374761393 + y * 668265263 + 1013904223) | 0;
     h = (h ^ (h >> 13)) * 1274126177;
