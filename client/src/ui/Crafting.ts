@@ -46,8 +46,7 @@ export class CraftingUI {
 
     const closeBtn = scene.add.text(panelW - 14, 3, '✕', {
       fontSize: '14px', color: '#ff4444',
-    }).setInteractive({ useHandCursor: true });
-    closeBtn.on('pointerdown', () => this.toggle());
+    });
     this.container.add(closeBtn);
 
     // Recipe list area (left)
@@ -65,8 +64,7 @@ export class CraftingUI {
     // Craft button
     this.craftBtn = scene.add.text(150, panelH - 30, '[ CRAFT ]', {
       fontSize: '12px', color: '#44ff44',
-    }).setInteractive({ useHandCursor: true });
-    this.craftBtn.on('pointerdown', () => this.doCraft());
+    });
     this.craftBtn.setVisible(false);
     this.container.add(this.craftBtn);
 
@@ -153,11 +151,8 @@ export class CraftingUI {
       const hexColor = '#' + color.toString(16).padStart(6, '0');
       const txt = this.scene.add.text(8, 36 + i * 16, recipe.name, {
         fontSize: '9px', color: hexColor,
-      }).setInteractive({ useHandCursor: true });
-
-      txt.on('pointerdown', () => this.selectRecipe(i));
-      txt.on('pointerover', () => txt.setColor('#ffffff'));
-      txt.on('pointerout', () => txt.setColor(hexColor));
+      });
+      // Interactions handled via screen-space routing
 
       this.container.add(txt);
       this.recipeTexts.push(txt);

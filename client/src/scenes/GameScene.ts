@@ -97,7 +97,8 @@ export class GameScene extends Phaser.Scene {
   private respawnTimer = 0;
 
   // Ground items
-  private groundItems: Map<string, { sprite: Phaser.GameObjects.Sprite; text: Phaser.GameObjects.Text }> = new Map();
+  private groundItems: Map<string, { sprite: Phaser.GameObjects.Sprite; text: Phaser.GameObjects.Text; gridX: number; gridY: number }> = new Map();
+  private lastAutoPickupTime = 0;
 
   // Tutorial overlay
   private tutorial!: TutorialOverlay;
@@ -296,8 +297,9 @@ export class GameScene extends Phaser.Scene {
     this.chatBox.addSystemMessage('Keys: I=Inventory E=Equipment B=Bank C=Craft M=Market');
     this.chatBox.addSystemMessage('Click enemies to attack. ENTER to chat. /tutorial to replay guide.');
 
-    // Tutorial overlay (shows once for new players)
-    this.tutorial = new TutorialOverlay(this, this.playerId);
+    // Tutorial overlay (shows once for new players — keyed by username, not playerId UUID)
+    const tutorialKey = this.registry.get('username') as string || this.playerId;
+    this.tutorial = new TutorialOverlay(this, tutorialKey);
     this.tutorial.startIfNew();
 
     // Register /tutorial chat command
@@ -467,6 +469,20 @@ export class GameScene extends Phaser.Scene {
       } else {
         // Target entity no longer exists
         this.selectedEntityId = null;
+      }
+    }
+
+    // Auto-pickup ground items when walking near them (throttled to 5/sec)
+    if (!this.isDead && _time - this.lastAutoPickupTime > 200) {
+      this.lastAutoPickupTime = _time;
+      for (const [id, gItem] of this.groundItems) {
+        const dx = this.playerGridX - gItem.gridX;
+        const dy = this.playerGridY - gItem.gridY;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < 1.8) {
+          this.network.send(MessageType.PickupItem, { itemId: id });
+          break; // one per tick to avoid spam
+        }
       }
     }
 
@@ -959,41 +975,39 @@ export class GameScene extends Phaser.Scene {
         const isXpOrb = item.name.startsWith('XP Orb');
 
         if (isXpOrb) {
-          // XP orb — use glowing orb texture, no name label, floating bob animation
           const orbKey = item.rarity >= 3 ? 'xp_orb_purple' : item.rarity >= 2 ? 'xp_orb_blue' : 'xp_orb_green';
           const sprite = this.add.sprite(pos.x, pos.y, orbKey)
             .setDepth(pos.y - 5000)
             .setAlpha(0.85);
 
-          // Gentle floating bob animation
           this.tweens.add({
             targets: sprite, y: pos.y - 4, duration: 800 + Math.random() * 400,
             yoyo: true, repeat: -1, ease: 'Sine.easeInOut',
           });
 
-          // Empty text placeholder (to keep the map structure consistent)
           const text = this.add.text(0, 0, '').setVisible(false);
-          this.groundItems.set(item.id, { sprite, text });
+          this.groundItems.set(item.id, { sprite, text, gridX: item.x, gridY: item.y });
         } else {
-          // Normal item drop
           const color = this.RARITY_COLORS[item.rarity] ?? 0xffffff;
 
+          // Make ground items larger and easier to see
           const sprite = this.add.sprite(pos.x, pos.y, 'item_drop')
             .setDepth(pos.y - 5000)
             .setTint(color)
-            .setInteractive({ useHandCursor: true });
+            .setScale(1.5);
 
           const text = this.add.text(pos.x, pos.y - 20, item.name, {
-            fontSize: '8px', color: `#${color.toString(16).padStart(6, '0')}`,
-            stroke: '#000000', strokeThickness: 2,
+            fontSize: '9px', color: `#${color.toString(16).padStart(6, '0')}`,
+            stroke: '#000000', strokeThickness: 3,
           }).setOrigin(0.5).setDepth(pos.y - 4999);
 
-          // Click to pick up
-          sprite.on('pointerdown', () => {
-            this.network.send(MessageType.PickupItem, { itemId: item.id });
+          // Gentle pulsing to draw attention
+          this.tweens.add({
+            targets: sprite, alpha: 0.6, duration: 600,
+            yoyo: true, repeat: -1, ease: 'Sine.easeInOut',
           });
 
-          this.groundItems.set(item.id, { sprite, text });
+          this.groundItems.set(item.id, { sprite, text, gridX: item.x, gridY: item.y });
         }
       }
     }

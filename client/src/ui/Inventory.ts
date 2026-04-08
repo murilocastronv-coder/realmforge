@@ -61,8 +61,8 @@ export class InventoryUI {
     // Close button
     const closeBtn = scene.add.text(totalW - 14, 4, '✕', {
       fontSize: '14px', color: '#ff4444',
-    }).setInteractive({ useHandCursor: true });
-    closeBtn.on('pointerdown', () => this.toggle());
+    });
+    // Close handled via screen-space routing
     this.container.add(closeBtn);
 
     // Gold display
@@ -80,12 +80,9 @@ export class InventoryUI {
         const slot = scene.add.rectangle(sx, sy, SLOT_SIZE, SLOT_SIZE, 0x2a2a4a, 0.9);
         slot.setOrigin(0, 0);
         slot.setStrokeStyle(1, 0x444466);
-        slot.setInteractive({ useHandCursor: true });
+        // NOTE: No setInteractive() — clicks are routed via screen-space in GameScene
 
         const idx = row * COLS + col;
-        slot.on('pointerdown', () => this.handleSlotClick(idx));
-        slot.on('pointerover', () => this.showTooltip(idx, sx, sy));
-        slot.on('pointerout', () => this.hideTooltip());
 
         this.container.add(slot);
         this.slotGraphics.push(slot);

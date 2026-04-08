@@ -49,21 +49,18 @@ export class MarketplaceUI {
 
     const closeBtn = scene.add.text(panelW - 14, 3, '✕', {
       fontSize: '14px', color: '#ff4444',
-    }).setInteractive({ useHandCursor: true });
-    closeBtn.on('pointerdown', () => this.toggle());
+    });
     this.container.add(closeBtn);
 
     // Buy/Sell tabs
     const buyTab = scene.add.text(10, 24, '[ BUY ]', {
       fontSize: '10px', color: '#44ff44',
-    }).setInteractive({ useHandCursor: true });
-    buyTab.on('pointerdown', () => this.setMode('buy'));
+    });
     this.container.add(buyTab);
 
     const sellTab = scene.add.text(70, 24, '[ SELL ]', {
       fontSize: '10px', color: '#ff8844',
-    }).setInteractive({ useHandCursor: true });
-    sellTab.on('pointerdown', () => this.setMode('sell'));
+    });
     this.container.add(sellTab);
 
     this.modeText = scene.add.text(panelW - 60, 24, 'BUY MODE', {
@@ -90,8 +87,7 @@ export class MarketplaceUI {
     // Action button
     this.actionBtn = scene.add.text(panelW - 80, panelH - 30, '[ BUY ]', {
       fontSize: '12px', color: '#44ff44',
-    }).setInteractive({ useHandCursor: true });
-    this.actionBtn.on('pointerdown', () => this.doAction());
+    });
     this.actionBtn.setVisible(false);
     this.container.add(this.actionBtn);
 
@@ -152,8 +148,8 @@ export class MarketplaceUI {
 
       const nameText = this.scene.add.text(10, y, listing.item.name, {
         fontSize: '9px', color: hexColor,
-      }).setInteractive({ useHandCursor: true });
-      nameText.on('pointerdown', () => this.selectListing(i));
+      });
+      // Interactions handled via screen-space routing
 
       const priceText = this.scene.add.text(150, y, `${listing.price}g`, {
         fontSize: '9px', color: '#ffcc00',

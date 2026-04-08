@@ -55,8 +55,8 @@ export class EquipmentUI {
     // Close
     const closeBtn = scene.add.text(panelW - 14, 2, '✕', {
       fontSize: '14px', color: '#ff4444',
-    }).setInteractive({ useHandCursor: true });
-    closeBtn.on('pointerdown', () => this.toggle());
+    });
+    // Close handled via screen-space routing
     this.container.add(closeBtn);
 
     // Create equipment slots
@@ -64,8 +64,7 @@ export class EquipmentUI {
       const rect = scene.add.rectangle(slot.x, slot.y + 20, SLOT_SIZE, SLOT_SIZE, 0x2a2a4a, 0.9);
       rect.setOrigin(0, 0);
       rect.setStrokeStyle(1, 0x555577);
-      rect.setInteractive({ useHandCursor: true });
-      rect.on('pointerdown', () => this.handleSlotClick(slot.id));
+      // NOTE: No setInteractive() here — clicks are routed via screen-space in GameScene.handleScreenClick
       this.container.add(rect);
       this.slotRects.set(slot.id, rect);
 

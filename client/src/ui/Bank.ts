@@ -44,8 +44,7 @@ export class BankUI {
 
     const closeBtn = scene.add.text(totalW - 14, 3, '✕', {
       fontSize: '14px', color: '#ff4444',
-    }).setInteractive({ useHandCursor: true });
-    closeBtn.on('pointerdown', () => this.toggle());
+    });
     this.container.add(closeBtn);
 
     for (let row = 0; row < BANK_ROWS; row++) {
@@ -57,8 +56,6 @@ export class BankUI {
         const rect = scene.add.rectangle(sx, sy, SLOT_SIZE, SLOT_SIZE, 0x2a2a4e, 0.9);
         rect.setOrigin(0, 0);
         rect.setStrokeStyle(1, 0x444466);
-        rect.setInteractive({ useHandCursor: true });
-        rect.on('pointerdown', () => this.handleSlotClick(idx));
         this.container.add(rect);
         this.slotRects.push(rect);
 

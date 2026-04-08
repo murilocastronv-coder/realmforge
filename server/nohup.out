@@ -1,0 +1,50 @@
+warning: unused variable: `slot`
+   --> src/protocol.rs:578:28
+    |
+578 |                 let (name, slot) = WEAPON_TEMPLATES[rng.gen_range(0..WEAPON_TEMPLATES.len())];
+    |                            ^^^^ help: if this is intentional, prefix it with an underscore: `_slot`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `gold_amount`
+   --> src/protocol.rs:595:9
+    |
+595 |     let gold_amount = (10 + zone_level * 5 + enemy_level * 3) as u64;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_gold_amount`
+
+warning: function `nearby_cells` is never used
+  --> src/main.rs:37:4
+   |
+37 | fn nearby_cells(x: f64, y: f64) -> Vec<(i32, i32)> {
+   |    ^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `seq` is never read
+  --> src/protocol.rs:73:9
+   |
+68 | pub struct MovePayload {
+   |            ----------- field in this struct
+...
+73 |     pub seq: u32,
+   |         ^^^
+   |
+   = note: `MovePayload` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: field `modifiers` is never read
+   --> src/protocol.rs:321:9
+    |
+303 | pub struct EnemyData {
+    |            --------- field in this struct
+...
+321 |     pub modifiers: Vec<EnemyModifier>,
+    |         ^^^^^^^^^
+    |
+    = note: `EnemyData` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: `realmforge-server` (bin "realmforge-server") generated 5 warnings (run `cargo fix --bin "realmforge-server" -p realmforge-server` to apply 2 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.13s
+     Running `target/debug/realmforge-server`
+[2m2026-04-08T11:10:15.180111Z[0m [32m INFO[0m [2mrealmforge_server[0m[2m:[0m Spawned 440 initial enemies
+[2m2026-04-08T11:10:15.181208Z[0m [32m INFO[0m [2mrealmforge_server[0m[2m:[0m 🏰 RealmForge server starting on 0.0.0.0:8080
+[2m2026-04-08T11:10:15.181270Z[0m [32m INFO[0m [2mrealmforge_server[0m[2m:[0m    WebSocket endpoint: ws://0.0.0.0:8080/ws

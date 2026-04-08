@@ -632,6 +632,9 @@ fn handle_attack(state: &Arc<AppState>, attacker_id: Uuid, target_id: Uuid) {
     let (atk, level, ax, ay, lck) = attacker_stats;
 
     if let Some(mut enemy) = state.enemies.get_mut(&target_id) {
+        // Guard: if enemy is already dead, skip (prevents double-kill race condition)
+        if enemy.hp <= 0 || matches!(enemy.state, EnemyState::Dead) { return; }
+
         let dist = ((enemy.x - ax).powi(2) + (enemy.y - ay).powi(2)).sqrt();
         if dist > 3.0 { return; }
 
