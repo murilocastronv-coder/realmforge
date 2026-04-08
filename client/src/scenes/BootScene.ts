@@ -37,6 +37,7 @@ export class BootScene extends Phaser.Scene {
     this.generateTileTextures();
     this.generatePlayerTexture();
     this.generateEnemyTexture();
+    this.generateItemDropTexture();
   }
 
   create(): void {
@@ -126,6 +127,21 @@ export class BootScene extends Phaser.Scene {
     gfx.fillCircle(11, 17, 1.5);
     gfx.fillCircle(21, 17, 1.5);
     gfx.generateTexture('enemy_slime', 32, 32);
+    gfx.destroy();
+  }
+
+  private generateItemDropTexture(): void {
+    const gfx = this.add.graphics();
+    // Small glowing bag/pouch
+    gfx.fillStyle(0xddaa44, 1);
+    gfx.fillRoundedRect(4, 6, 8, 8, 2);
+    // Tie at top
+    gfx.fillStyle(0xbb8833, 1);
+    gfx.fillRect(6, 4, 4, 3);
+    // Shine
+    gfx.fillStyle(0xffffff, 0.5);
+    gfx.fillCircle(7, 8, 1.5);
+    gfx.generateTexture('item_drop', 16, 16);
     gfx.destroy();
   }
 

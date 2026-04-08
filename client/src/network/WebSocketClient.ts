@@ -12,6 +12,7 @@ export enum MessageType {
   UnequipItem = 8,
   BankDeposit = 9,
   BankWithdraw = 10,
+  AttackPlayer = 11,
 
   // Server → Client
   AuthResult = 50,
@@ -27,6 +28,8 @@ export enum MessageType {
   LevelUp = 60,
   Death = 61,
   Respawn = 62,
+  GroundItems = 63,
+  BankUpdate = 64,
 }
 
 export interface GameMessage {

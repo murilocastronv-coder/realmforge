@@ -89,6 +89,9 @@ export class GameScene extends Phaser.Scene {
   private selectedEntityId: string | null = null;
   private attackCooldown = 0;
 
+  // Ground items
+  private groundItems: Map<string, { sprite: Phaser.GameObjects.Sprite; text: Phaser.GameObjects.Text }> = new Map();
+
   constructor() {
     super({ key: 'GameScene' });
   }
@@ -142,12 +145,22 @@ export class GameScene extends Phaser.Scene {
 
     // Inventory (center-right, toggled)
     this.inventoryUI = new InventoryUI(this, GAME_WIDTH / 1.5 - 200, 180);
+    this.inventoryUI.setOnItemClick((_item, index) => {
+      // Double-click/right-click to equip — send equip request
+      this.network.send(MessageType.EquipItem, { slot: index });
+    });
 
     // Equipment (center-left of inventory, toggled)
     this.equipmentUI = new EquipmentUI(this, GAME_WIDTH / 1.5 - 380, 180);
+    this.equipmentUI.setOnUnequip((slotId) => {
+      this.network.send(MessageType.UnequipItem, { slot: slotId });
+    });
 
     // Bank (center, toggled)
     this.bankUI = new BankUI(this, GAME_WIDTH / 3 - 200, 120);
+    this.bankUI.setOnWithdraw((_item, index) => {
+      this.network.send(MessageType.BankWithdraw, { slot: index });
+    });
 
     // Crafting (center, toggled)
     this.craftingUI = new CraftingUI(this, GAME_WIDTH / 3 - 150, 120);
@@ -271,17 +284,21 @@ export class GameScene extends Phaser.Scene {
     // Attack cooldown
     if (this.attackCooldown > 0) this.attackCooldown -= delta;
 
-    // Auto-attack selected enemy
+    // Auto-attack selected target
     if (this.selectedEntityId && this.attackCooldown <= 0) {
       const target = this.entities.get(this.selectedEntityId);
-      if (target && target.entityType === 'enemy') {
+      if (target) {
         const dist = Math.sqrt(
           Math.pow(this.playerGridX - target.gridX, 2) +
           Math.pow(this.playerGridY - target.gridY, 2)
         );
         if (dist < 2) {
-          this.network.send(MessageType.Attack, { targetId: this.selectedEntityId });
-          this.attackCooldown = 1000; // 1s cooldown
+          if (target.entityType === 'enemy') {
+            this.network.send(MessageType.Attack, { targetId: this.selectedEntityId });
+          } else if (target.entityType === 'player') {
+            this.network.send(MessageType.AttackPlayer, { targetId: this.selectedEntityId });
+          }
+          this.attackCooldown = 1000;
           this.showAttackEffect(target.sprite.x, target.sprite.y);
         }
       }
@@ -386,6 +403,24 @@ export class GameScene extends Phaser.Scene {
       this.playerGridY = y;
       this.chatBox.addSystemMessage('You have respawned.');
     });
+
+    // Ground items nearby
+    this.network.on(MessageType.GroundItems, (msg) => {
+      const { items } = msg.payload as { items: Array<{ id: string; name: string; rarity: number; x: number; y: number }> };
+      this.updateGroundItems(items);
+    });
+
+    // Bank contents update
+    this.network.on(MessageType.BankUpdate, (msg) => {
+      const { items } = msg.payload as { items: unknown[] };
+      this.chatBox.addSystemMessage(`Bank updated (${items.length} items)`);
+    });
+
+    // Chat messages
+    this.network.on(MessageType.ChatMessage, (msg) => {
+      const { sender, text, channel } = msg.payload as { sender: string; text: string; channel?: string };
+      this.chatBox.addMessage(sender, text, channel || 'global');
+    });
   }
 
   // --- Entity Management ---
@@ -478,7 +513,77 @@ export class GameScene extends Phaser.Scene {
         });
       }
     } else if (entity.entityType === 'player') {
-      this.chatBox.addMessage('Info', `Player: ${entity.nameText.text} [Lv.${entity.level || '?'}]`, 'system');
+      // Shift+click = PvP attack
+      if (this.input.keyboard && this.input.keyboard.addKey('SHIFT').isDown) {
+        this.selectedEntityId = entityId;
+        this.chatBox.addMessage('PvP', `⚔️ Attacking player: ${entity.nameText.text}`, 'combat');
+        const dist = Math.sqrt(
+          Math.pow(this.playerGridX - entity.gridX, 2) +
+          Math.pow(this.playerGridY - entity.gridY, 2)
+        );
+        if (dist < 2 && this.attackCooldown <= 0) {
+          this.network.send(MessageType.AttackPlayer, { targetId: entityId });
+          this.attackCooldown = 1000;
+          this.showAttackEffect(entity.sprite.x, entity.sprite.y);
+        } else if (dist >= 2) {
+          this.targetGridX = entity.gridX;
+          this.targetGridY = entity.gridY;
+          this.moveSeq++;
+          this.network.send(MessageType.Move, {
+            targetX: entity.gridX, targetY: entity.gridY, seq: this.moveSeq,
+          });
+        }
+      } else {
+        this.chatBox.addMessage('Info', `Player: ${entity.nameText.text} [Lv.${entity.level || '?'}] (Shift+click to attack)`, 'system');
+      }
+    }
+  }
+
+  // --- Ground Items ---
+  private readonly RARITY_COLORS: Record<number, number> = {
+    0: 0xffffff, // Common - White
+    1: 0x00ff00, // Uncommon - Green
+    2: 0x4488ff, // Rare - Blue
+    3: 0xaa44ff, // Epic - Purple
+    4: 0xff8800, // Legendary - Orange
+    5: 0xff0044, // Mythic - Red
+  };
+
+  private updateGroundItems(items: Array<{ id: string; name: string; rarity: number; x: number; y: number }>): void {
+    const currentIds = new Set(items.map(i => i.id));
+
+    // Remove items no longer present
+    for (const [id, gfx] of this.groundItems.entries()) {
+      if (!currentIds.has(id)) {
+        gfx.sprite.destroy();
+        gfx.text.destroy();
+        this.groundItems.delete(id);
+      }
+    }
+
+    // Add/update items
+    for (const item of items) {
+      if (!this.groundItems.has(item.id)) {
+        const pos = worldToScreen(item.x, item.y);
+        const color = this.RARITY_COLORS[item.rarity] ?? 0xffffff;
+
+        const sprite = this.add.sprite(pos.x, pos.y, 'item_drop')
+          .setDepth(500)
+          .setTint(color)
+          .setInteractive({ useHandCursor: true });
+
+        const text = this.add.text(pos.x, pos.y - 14, item.name, {
+          fontSize: '8px', color: `#${color.toString(16).padStart(6, '0')}`,
+          stroke: '#000000', strokeThickness: 2,
+        }).setOrigin(0.5).setDepth(501);
+
+        // Click to pick up
+        sprite.on('pointerdown', () => {
+          this.network.send(MessageType.PickupItem, { itemId: item.id });
+        });
+
+        this.groundItems.set(item.id, { sprite, text });
+      }
     }
   }
 
