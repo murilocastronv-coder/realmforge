@@ -12,7 +12,7 @@ interface TutorialStep {
 const STEPS: TutorialStep[] = [
   {
     title: '🏰 Welcome to RealmForge!',
-    text: 'Click anywhere on the ground to move your character.\nYou can also scroll to zoom in/out.',
+    text: 'Click anywhere on the ground to move your character.\nExplore the world around the town!',
   },
   {
     title: '🛡️ Town Safe Zone',
@@ -65,7 +65,8 @@ export class TutorialOverlay {
   constructor(scene: Phaser.Scene, playerId: string) {
     this.scene = scene;
     this.playerId = playerId;
-    const { width, height } = scene.cameras.main;
+    const width = 1280;  // GAME_WIDTH
+    const height = 720;  // GAME_HEIGHT
 
     this.container = scene.add.container(0, 0);
     this.container.setScrollFactor(0);

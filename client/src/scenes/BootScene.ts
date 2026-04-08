@@ -144,52 +144,82 @@ export class BootScene extends Phaser.Scene {
 
   private generatePlayerTexture(): void {
     const gfx = this.add.graphics();
-    // Simple character placeholder: isometric "person" shape
+    // Larger character: 48×54 for better visibility
+    // Legs
+    gfx.fillStyle(0x334466, 1);
+    gfx.fillRoundedRect(14, 38, 8, 14, 2);
+    gfx.fillRoundedRect(26, 38, 8, 14, 2);
     // Body
     gfx.fillStyle(0x3388ff, 1);
-    gfx.fillEllipse(16, 22, 14, 18);
+    gfx.fillEllipse(24, 32, 22, 24);
+    // Belt
+    gfx.fillStyle(0x886633, 1);
+    gfx.fillRect(13, 36, 22, 3);
     // Head
     gfx.fillStyle(0xffcc88, 1);
-    gfx.fillCircle(16, 8, 7);
+    gfx.fillCircle(24, 14, 10);
+    // Hair
+    gfx.fillStyle(0x664422, 1);
+    gfx.fillEllipse(24, 8, 16, 8);
     // Eyes
     gfx.fillStyle(0x222222, 1);
-    gfx.fillCircle(14, 7, 1.5);
-    gfx.fillCircle(18, 7, 1.5);
-    gfx.generateTexture('player', 32, 36);
+    gfx.fillCircle(21, 13, 2);
+    gfx.fillCircle(27, 13, 2);
+    // Mouth
+    gfx.fillStyle(0xcc8866, 1);
+    gfx.fillRect(22, 18, 4, 1);
+    gfx.generateTexture('player', 48, 54);
     gfx.destroy();
   }
 
   private generateEnemyTexture(): void {
     const gfx = this.add.graphics();
-    // Simple enemy: red slime-like blob
+    // Larger enemy slime: 48×48
+    // Shadow
+    gfx.fillStyle(0x000000, 0.2);
+    gfx.fillEllipse(24, 42, 32, 8);
+    // Body
     gfx.fillStyle(0xcc2222, 1);
-    gfx.fillEllipse(16, 20, 20, 16);
+    gfx.fillEllipse(24, 30, 32, 24);
+    // Top bump
+    gfx.fillStyle(0xcc2222, 1);
+    gfx.fillEllipse(24, 20, 20, 16);
     // Highlight
     gfx.fillStyle(0xff4444, 0.6);
-    gfx.fillEllipse(12, 16, 6, 4);
+    gfx.fillEllipse(17, 22, 10, 6);
     // Eyes
     gfx.fillStyle(0xffff00, 1);
-    gfx.fillCircle(11, 17, 3);
-    gfx.fillCircle(21, 17, 3);
+    gfx.fillCircle(17, 26, 5);
+    gfx.fillCircle(31, 26, 5);
     gfx.fillStyle(0x000000, 1);
-    gfx.fillCircle(11, 17, 1.5);
-    gfx.fillCircle(21, 17, 1.5);
-    gfx.generateTexture('enemy_slime', 32, 32);
+    gfx.fillCircle(17, 26, 2.5);
+    gfx.fillCircle(31, 26, 2.5);
+    // Mouth
+    gfx.lineStyle(2, 0x880000, 0.8);
+    gfx.beginPath();
+    gfx.arc(24, 33, 6, 0, Math.PI, false);
+    gfx.strokePath();
+    gfx.generateTexture('enemy_slime', 48, 48);
     gfx.destroy();
   }
 
   private generateItemDropTexture(): void {
     const gfx = this.add.graphics();
-    // Small glowing bag/pouch
+    // Larger item bag: 24×24
+    // Shadow
+    gfx.fillStyle(0x000000, 0.2);
+    gfx.fillEllipse(12, 21, 16, 4);
+    // Bag body
     gfx.fillStyle(0xddaa44, 1);
-    gfx.fillRoundedRect(4, 6, 8, 8, 2);
+    gfx.fillRoundedRect(4, 8, 16, 14, 3);
     // Tie at top
     gfx.fillStyle(0xbb8833, 1);
-    gfx.fillRect(6, 4, 4, 3);
+    gfx.fillRect(8, 4, 8, 5);
+    gfx.fillCircle(12, 4, 3);
     // Shine
     gfx.fillStyle(0xffffff, 0.5);
-    gfx.fillCircle(7, 8, 1.5);
-    gfx.generateTexture('item_drop', 16, 16);
+    gfx.fillCircle(9, 12, 2);
+    gfx.generateTexture('item_drop', 24, 24);
     gfx.destroy();
   }
 

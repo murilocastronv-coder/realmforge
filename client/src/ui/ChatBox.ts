@@ -1,5 +1,6 @@
 import Phaser from 'phaser';
 import { WebSocketClient, MessageType } from '../network/WebSocketClient';
+import { GAME_WIDTH, GAME_HEIGHT } from '../utils/Constants';
 
 interface ChatMsg {
   sender: string;
@@ -236,18 +237,23 @@ export class ChatBox {
     });
   }
 
-  private createInputElement(x: number, y: number, width: number): void {
+  private resizeHandler?: () => void;
+  private inputPhaserX = 0;
+  private inputPhaserY = 0;
+  private inputPhaserW = 0;
+
+  private createInputElement(phaserX: number, phaserY: number, width: number): void {
+    this.inputPhaserX = phaserX;
+    this.inputPhaserY = phaserY;
+    this.inputPhaserW = width;
+
     const input = document.createElement('input');
     input.type = 'text';
     input.id = 'rf-chat-input';
     input.placeholder = 'Press ENTER to chat...';
     input.maxLength = 200;
     input.style.cssText = `
-      position: absolute;
-      left: ${x}px;
-      top: ${y}px;
-      width: ${width - 4}px;
-      height: 22px;
+      position: fixed;
       background: #1a1a2e;
       color: #fff;
       border: 1px solid #444466;
@@ -256,6 +262,7 @@ export class ChatBox {
       outline: none;
       display: none;
       z-index: 1000;
+      box-sizing: border-box;
     `;
 
     input.addEventListener('keydown', (e) => {
@@ -278,11 +285,32 @@ export class ChatBox {
       this.scene.input.keyboard!.enabled = true;
     });
 
-    document.getElementById('game-container')!.appendChild(input);
+    document.body.appendChild(input);
     this.inputElement = input;
+
+    // Position the input to match the Phaser canvas scaling
+    this.repositionInput();
+    this.resizeHandler = () => this.repositionInput();
+    window.addEventListener('resize', this.resizeHandler);
+  }
+
+  private repositionInput(): void {
+    if (!this.inputElement) return;
+    const canvas = this.scene.game.canvas;
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = rect.width / GAME_WIDTH;
+    const scaleY = rect.height / GAME_HEIGHT;
+    this.inputElement.style.left = `${rect.left + this.inputPhaserX * scaleX}px`;
+    this.inputElement.style.top = `${rect.top + this.inputPhaserY * scaleY}px`;
+    this.inputElement.style.width = `${(this.inputPhaserW - 4) * scaleX}px`;
+    this.inputElement.style.height = `${22 * scaleY}px`;
+    this.inputElement.style.fontSize = `${Math.max(9, Math.round(11 * scaleY))}px`;
   }
 
   destroy(): void {
+    if (this.resizeHandler) {
+      window.removeEventListener('resize', this.resizeHandler);
+    }
     if (this.inputElement) {
       this.inputElement.remove();
     }

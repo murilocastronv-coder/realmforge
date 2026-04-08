@@ -131,6 +131,9 @@ export class LoginScene extends Phaser.Scene {
         statusText.setColor('#00cc66');
         this.registry.set('playerId', result.playerId);
         this.registry.set('username', usernameInput.value.trim());
+        // Clean up DOM inputs and resize handlers
+        this.resizeHandlers.forEach(h => window.removeEventListener('resize', h));
+        this.resizeHandlers = [];
         usernameInput.remove();
         passwordInput.remove();
         this.cameras.main.fadeOut(400, 0, 0, 0);
@@ -142,17 +145,15 @@ export class LoginScene extends Phaser.Scene {
     });
   }
 
+  private resizeHandlers: Array<() => void> = [];
+
   private createInput(x: number, y: number, id: string, isPassword = false): HTMLInputElement {
     const input = document.createElement('input');
     input.type = isPassword ? 'password' : 'text';
     input.id = `rf-${id}`;
     input.placeholder = isPassword ? '••••••••' : 'Enter username';
     input.style.cssText = `
-      position: absolute;
-      left: ${x - 120}px;
-      top: ${y + 10}px;
-      width: 240px;
-      height: 28px;
+      position: fixed;
       background: #0d1220;
       color: #ddeeff;
       border: 1px solid #334455;
@@ -162,10 +163,34 @@ export class LoginScene extends Phaser.Scene {
       font-family: monospace;
       outline: none;
       transition: border-color 0.2s;
+      box-sizing: border-box;
     `;
     input.onfocus = () => { input.style.borderColor = '#4488ff'; };
     input.onblur = () => { input.style.borderColor = '#334455'; };
-    document.getElementById('game-container')!.appendChild(input);
+    document.body.appendChild(input);
+
+    // Phaser coordinates for this input
+    const phaserX = x - 120;
+    const phaserY = y + 10;
+    const phaserW = 240;
+    const phaserH = 28;
+
+    const reposition = () => {
+      const canvas = this.game.canvas;
+      const rect = canvas.getBoundingClientRect();
+      const scaleX = rect.width / GAME_WIDTH;
+      const scaleY = rect.height / GAME_HEIGHT;
+      input.style.left = `${rect.left + phaserX * scaleX}px`;
+      input.style.top = `${rect.top + phaserY * scaleY}px`;
+      input.style.width = `${phaserW * scaleX}px`;
+      input.style.height = `${phaserH * scaleY}px`;
+      input.style.fontSize = `${Math.max(10, Math.round(13 * scaleY))}px`;
+    };
+
+    reposition();
+    window.addEventListener('resize', reposition);
+    this.resizeHandlers.push(reposition);
+
     return input;
   }
 }

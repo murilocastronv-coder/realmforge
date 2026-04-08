@@ -114,14 +114,14 @@ export class GameScene extends Phaser.Scene {
   create(): void {
     this.cameras.main.setBackgroundColor(0x111111);
 
-    // Player sprite
+    // Player sprite (48×54 texture, origin bottom-center)
     const screenPos = worldToScreen(0, 0);
-    this.playerSprite = this.add.sprite(screenPos.x, screenPos.y - 18, 'player');
+    this.playerSprite = this.add.sprite(screenPos.x, screenPos.y - 27, 'player');
     this.playerSprite.setDepth(1000);
     this.playerSprite.setOrigin(0.5, 1);
 
     const username = this.registry.get('username') as string || 'Player';
-    this.playerNameText = this.add.text(screenPos.x, screenPos.y - 44, username, {
+    this.playerNameText = this.add.text(screenPos.x, screenPos.y - 60, username, {
       fontSize: '10px', color: '#ffffff',
       stroke: '#000000', strokeThickness: 2,
     }).setOrigin(0.5).setDepth(1001);
@@ -131,15 +131,13 @@ export class GameScene extends Phaser.Scene {
     this.cursorHighlight.setDepth(999);
     this.drawCursorHighlight(0, 0);
 
-    // Camera
+    // Camera (no zoom — UI elements use GAME_WIDTH×GAME_HEIGHT coordinate space directly)
     this.cameras.main.startFollow(this.playerSprite, true, 0.1, 0.1);
-    this.cameras.main.setZoom(1.5);
 
     // Death overlay (hidden initially)
-    const cam = this.cameras.main;
-    this.deathOverlay = this.add.rectangle(cam.width / 2, cam.height / 2, cam.width + 200, cam.height + 200, 0x000000, 0.7)
+    this.deathOverlay = this.add.rectangle(GAME_WIDTH / 2, GAME_HEIGHT / 2, GAME_WIDTH + 200, GAME_HEIGHT + 200, 0x000000, 0.7)
       .setScrollFactor(0).setDepth(9000).setVisible(false);
-    this.deathText = this.add.text(cam.width / 2, cam.height / 2 - 20, '', {
+    this.deathText = this.add.text(GAME_WIDTH / 2, GAME_HEIGHT / 2 - 20, '', {
       fontSize: '20px', color: '#ff4444', fontStyle: 'bold',
       stroke: '#000', strokeThickness: 3,
     }).setScrollFactor(0).setDepth(9001).setOrigin(0.5).setVisible(false);
@@ -154,16 +152,16 @@ export class GameScene extends Phaser.Scene {
     this.statsUI.updateStats(this.playerStats);
 
     // Minimap (top-right)
-    this.minimap = new Minimap(this, GAME_WIDTH / 1.5 - 150, 10);
+    this.minimap = new Minimap(this, GAME_WIDTH - 150, 10);
 
     // Health bars (floating over entities)
     this.healthBars = new HealthBars(this);
 
     // Chat (bottom-left)
-    this.chatBox = new ChatBox(this, this.network, 10, GAME_HEIGHT / 1.5 - 210);
+    this.chatBox = new ChatBox(this, this.network, 10, GAME_HEIGHT - 220);
 
-    // Inventory (center-right, toggled)
-    this.inventoryUI = new InventoryUI(this, GAME_WIDTH / 1.5 - 200, 180);
+    // Inventory (right side, toggled) — 356px wide
+    this.inventoryUI = new InventoryUI(this, GAME_WIDTH - 370, 60);
     this.inventoryUI.setOnItemClick((_item, index) => {
       if (this.bankUI.isVisible()) {
         // Bank is open — deposit item instead of equipping
@@ -173,27 +171,27 @@ export class GameScene extends Phaser.Scene {
       }
     });
 
-    // Equipment (center-left of inventory, toggled)
-    this.equipmentUI = new EquipmentUI(this, GAME_WIDTH / 1.5 - 380, 180);
+    // Equipment (left of inventory, toggled) — 165px wide
+    this.equipmentUI = new EquipmentUI(this, GAME_WIDTH - 550, 60);
     this.equipmentUI.setOnUnequip((slotId) => {
       this.network.send(MessageType.UnequipItem, { slot: slotId });
     });
 
-    // Bank (center, toggled)
-    this.bankUI = new BankUI(this, GAME_WIDTH / 3 - 200, 120);
+    // Bank (centered, toggled) — ~393px wide
+    this.bankUI = new BankUI(this, Math.floor((GAME_WIDTH - 400) / 2), 100);
     this.bankUI.setOnWithdraw((_item, index) => {
       this.network.send(MessageType.BankWithdraw, { bankSlot: index });
     });
 
-    // Crafting (center, toggled)
-    this.craftingUI = new CraftingUI(this, GAME_WIDTH / 3 - 150, 120);
+    // Crafting (centered, toggled) — 300px wide
+    this.craftingUI = new CraftingUI(this, Math.floor((GAME_WIDTH - 300) / 2), 100);
     this.craftingUI.setOnCraft((recipe) => {
       this.chatBox.addSystemMessage(`Crafting ${recipe.name}...`);
       this.network.send(MessageType.UseItem, { action: 'craft', recipeId: recipe.id });
     });
 
-    // Marketplace (center, toggled)
-    this.marketplaceUI = new MarketplaceUI(this, GAME_WIDTH / 3 - 200, 80);
+    // Marketplace (centered, toggled) — 400px wide
+    this.marketplaceUI = new MarketplaceUI(this, Math.floor((GAME_WIDTH - 400) / 2), 80);
     this.marketplaceUI.setOnBuy((listing) => {
       this.chatBox.addSystemMessage(`Buying ${listing.item.name} for ${listing.price}g...`);
       this.network.send(MessageType.UseItem, { action: 'buy', listingId: listing.id });
@@ -239,11 +237,13 @@ export class GameScene extends Phaser.Scene {
     keys.on('keydown-M', () => this.marketplaceUI.toggle());
     keys.on('keydown-ESC', () => this.closeAllPanels());
 
-    // Camera zoom
-    this.input.on('wheel', (_pointer: unknown, _gos: unknown, _dx: number, dy: number) => {
-      const zoom = this.cameras.main.zoom;
-      this.cameras.main.setZoom(Phaser.Math.Clamp(zoom - dy * 0.001, 0.5, 3));
-    });
+    // Keyboard hints HUD bar (bottom of screen)
+    const hintsText = '  I: Inventory  |  E: Equipment  |  B: Bank  |  C: Craft  |  M: Market  |  ENTER: Chat  |  ESC: Close  ';
+    const hintsBg = this.add.rectangle(GAME_WIDTH / 2, GAME_HEIGHT - 12, GAME_WIDTH, 24, 0x000000, 0.6)
+      .setScrollFactor(0).setDepth(2500).setOrigin(0.5, 0.5);
+    const hintsLabel = this.add.text(GAME_WIDTH / 2, GAME_HEIGHT - 12, hintsText, {
+      fontSize: '11px', color: '#99aabb', fontStyle: 'bold',
+    }).setScrollFactor(0).setDepth(2501).setOrigin(0.5, 0.5);
 
     // Network handlers
     this.setupNetworkHandlers();
@@ -288,14 +288,14 @@ export class GameScene extends Phaser.Scene {
     this.playerGridX = Phaser.Math.Linear(this.playerGridX, this.targetGridX, speed);
     this.playerGridY = Phaser.Math.Linear(this.playerGridY, this.targetGridY, speed);
     const screenPos = worldToScreen(this.playerGridX, this.playerGridY);
-    this.playerSprite.setPosition(screenPos.x, screenPos.y - 18);
-    this.playerNameText.setPosition(screenPos.x, screenPos.y - 44);
+    this.playerSprite.setPosition(screenPos.x, screenPos.y - 27);
+    this.playerNameText.setPosition(screenPos.x, screenPos.y - 60);
     this.playerSprite.setDepth(screenPos.y + 1000);
     this.playerNameText.setDepth(screenPos.y + 1001);
 
     // Coords display
     this.coordsText.setText(
-      `Pos: ${Math.round(this.playerGridX)}, ${Math.round(this.playerGridY)} | Zoom: ${this.cameras.main.zoom.toFixed(1)}x`
+      `Pos: ${Math.round(this.playerGridX)}, ${Math.round(this.playerGridY)}`
     );
 
     // Interpolate remote entities + update health bars
@@ -305,7 +305,7 @@ export class GameScene extends Phaser.Scene {
       const ex = Phaser.Math.Linear(entity.sprite.x, entity.targetX, speed);
       const ey = Phaser.Math.Linear(entity.sprite.y, entity.targetY, speed);
       entity.sprite.setPosition(ex, ey);
-      entity.nameText.setPosition(ex, ey - 26);
+      entity.nameText.setPosition(ex, ey - 38);
 
       const depthBase = entity.entityType === 'player' ? 900 : 500;
       entity.sprite.setDepth(ey + depthBase);
@@ -313,7 +313,7 @@ export class GameScene extends Phaser.Scene {
 
       // Update floating health bars for enemies
       if (entity.hp !== undefined && entity.maxHp !== undefined && entity.entityType === 'enemy') {
-        this.healthBars.update(id, ex, ey - 30, entity.hp, entity.maxHp, ey + depthBase + 2);
+        this.healthBars.update(id, ex, ey - 42, entity.hp, entity.maxHp, ey + depthBase + 2);
       }
 
       // Collect for minimap
@@ -421,7 +421,7 @@ export class GameScene extends Phaser.Scene {
         }
       }
       if (targetId === this.playerId) {
-        this.showDamageNumber(this.playerSprite.x, this.playerSprite.y - 40, damage, isCrit);
+        this.showDamageNumber(this.playerSprite.x, this.playerSprite.y - 55, damage, isCrit);
       }
     });
 
@@ -499,7 +499,7 @@ export class GameScene extends Phaser.Scene {
   private updateRemoteEntity(entity: EntityState): void {
     const screenPos = worldToScreen(entity.x, entity.y);
     const targetX = screenPos.x;
-    const targetY = screenPos.y - 18;
+    const targetY = screenPos.y - 27;
 
     if (this.entities.has(entity.id)) {
       const remote = this.entities.get(entity.id)!;
@@ -523,7 +523,7 @@ export class GameScene extends Phaser.Scene {
       ? `${entity.name || 'Enemy'} [Lv.${entity.level || 1}]`
       : entity.name || 'Unknown';
 
-    const nameText = this.add.text(targetX, targetY - 26, displayName, {
+    const nameText = this.add.text(targetX, targetY - 38, displayName, {
       fontSize: '9px', color: nameColor,
       stroke: '#000000', strokeThickness: 2,
     }).setOrigin(0.5);
@@ -554,7 +554,7 @@ export class GameScene extends Phaser.Scene {
     for (const [id, entity] of this.entities) {
       const dx = Math.abs(entity.sprite.x - worldX);
       const dy = Math.abs(entity.sprite.y - worldY);
-      if (dx < 16 && dy < 24) return id;
+      if (dx < 24 && dy < 36) return id;
     }
     return null;
   }
@@ -644,7 +644,7 @@ export class GameScene extends Phaser.Scene {
           .setTint(color)
           .setInteractive({ useHandCursor: true });
 
-        const text = this.add.text(pos.x, pos.y - 14, item.name, {
+        const text = this.add.text(pos.x, pos.y - 20, item.name, {
           fontSize: '8px', color: `#${color.toString(16).padStart(6, '0')}`,
           stroke: '#000000', strokeThickness: 2,
         }).setOrigin(0.5).setDepth(pos.y - 4999);
@@ -900,10 +900,9 @@ export class GameScene extends Phaser.Scene {
   }
 
   private setupConnectionOverlay(): void {
-    const { width } = this.cameras.main;
-    const overlay = this.add.rectangle(width / 2, 0, 260, 28, 0x000000, 0.75)
+    const overlay = this.add.rectangle(GAME_WIDTH / 2, 0, 260, 28, 0x000000, 0.75)
       .setScrollFactor(0).setDepth(10000).setOrigin(0.5, 0).setVisible(false);
-    const label = this.add.text(width / 2, 6, '', {
+    const label = this.add.text(GAME_WIDTH / 2, 6, '', {
       fontSize: '12px', color: '#ff6644', fontStyle: 'bold',
     }).setScrollFactor(0).setDepth(10001).setOrigin(0.5, 0).setVisible(false);
 

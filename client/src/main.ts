@@ -9,9 +9,9 @@ const config: Phaser.Types.Core.GameConfig = {
   parent: 'game-container',
   width: GAME_WIDTH,
   height: GAME_HEIGHT,
-  pixelArt: true,
-  roundPixels: true,
-  antialias: false,
+  pixelArt: false,
+  roundPixels: false,
+  antialias: true,
   backgroundColor: '#111111',
   scene: [BootScene, LoginScene, GameScene],
   scale: {
@@ -21,6 +21,9 @@ const config: Phaser.Types.Core.GameConfig = {
   input: {
     keyboard: true,
     mouse: true,
+  },
+  dom: {
+    createContainer: true,
   },
 };
 

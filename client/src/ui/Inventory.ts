@@ -159,7 +159,14 @@ export class InventoryUI {
     const item = this.items[index];
     if (!item) return;
 
-    this.tooltipContainer = this.scene.add.container(slotX + SLOT_SIZE + 8, slotY);
+    const tipW = 140;
+    // If tooltip would overflow right edge, flip to the left side
+    const containerX = this.container.x;
+    const tooltipRight = containerX + slotX + SLOT_SIZE + 8 + tipW;
+    const flipLeft = tooltipRight > 1280; // GAME_WIDTH
+    const tipX = flipLeft ? slotX - tipW - 8 : slotX + SLOT_SIZE + 8;
+
+    this.tooltipContainer = this.scene.add.container(tipX, slotY);
     this.tooltipContainer.setScrollFactor(0);
     this.tooltipContainer.setDepth(5000);
 
