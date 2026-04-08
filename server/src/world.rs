@@ -72,7 +72,7 @@ impl WorldGenerator {
         let dist = (wx * wx + wy * wy).sqrt();
 
         // Town area near center
-        if dist < 8.0 {
+        if dist < 15.0 {
             return 7; // town
         }
 
@@ -128,8 +128,10 @@ impl WorldGenerator {
     /// Get the zone level (difficulty) based on distance from center
     pub fn get_zone_level(&self, wx: f64, wy: f64) -> u32 {
         let dist = (wx * wx + wy * wy).sqrt();
-        let zone_radius = 20.0;
-        (dist / zone_radius).floor() as u32
+        // Zone 0 = safe (no enemies) within 30 tiles
+        if dist < 30.0 { return 0; }
+        let zone_radius = 25.0;
+        ((dist - 30.0) / zone_radius).floor() as u32 + 1
     }
 
     /// Get spawn points for enemies in a chunk

@@ -165,17 +165,17 @@ impl PlayerData {
             username,
             x: 0.0, y: 0.0,
             target_x: 0.0, target_y: 0.0,
-            hp: 100, max_hp: 100,
-            mp: 50, max_mp: 50,
+            hp: 200, max_hp: 200,
+            mp: 80, max_mp: 80,
             level: 1, xp: 0,
-            atk: 10, def: 5, spd: 10, lck: 5,
+            atk: 15, def: 10, spd: 12, lck: 5,
             gold: 100,
             inventory,
             equipment: HashMap::new(),
-            bank: vec![None; 80], // 10x8 grid
+            bank: vec![None; 80],
             dead: false,
             respawn_timer: 0.0,
-            pvp_protection: true, // level 1 < 10
+            pvp_protection: true,
         }
     }
 
@@ -309,6 +309,7 @@ pub struct EnemyData {
     pub target_player: Option<Uuid>,
     pub rank: EnemyRank,
     pub modifiers: Vec<EnemyModifier>,
+    pub attack_cooldown: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]

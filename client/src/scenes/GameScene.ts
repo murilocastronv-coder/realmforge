@@ -2,7 +2,7 @@ import Phaser from 'phaser';
 import { WebSocketClient, MessageType, EntityState, ChunkDataPayload } from '../network/WebSocketClient';
 import { worldToScreen, screenToWorld, TILE_WIDTH, TILE_HEIGHT } from '../utils/IsoMath';
 import { CHUNK_SIZE, INTERPOLATION_SPEED, GAME_WIDTH, GAME_HEIGHT } from '../utils/Constants';
-import { InventoryUI } from '../ui/Inventory';
+import { InventoryUI, GameItem } from '../ui/Inventory';
 import { EquipmentUI } from '../ui/Equipment';
 import { StatsUI, PlayerStats } from '../ui/Stats';
 import { BankUI } from '../ui/Bank';
@@ -79,15 +79,21 @@ export class GameScene extends Phaser.Scene {
 
   // Player stats cache
   private playerStats: PlayerStats = {
-    hp: 100, maxHp: 100,
-    mp: 50, maxMp: 50,
+    hp: 200, maxHp: 200,
+    mp: 80, maxMp: 80,
     level: 1, xp: 0, xpNeeded: 100,
-    atk: 10, def: 5, spd: 10, lck: 5,
+    atk: 15, def: 10, spd: 12, lck: 5,
   };
 
   // Combat targeting
   private selectedEntityId: string | null = null;
   private attackCooldown = 0;
+  private isDead = false;
+
+  // Death overlay
+  private deathOverlay!: Phaser.GameObjects.Rectangle;
+  private deathText!: Phaser.GameObjects.Text;
+  private respawnTimer = 0;
 
   // Ground items
   private groundItems: Map<string, { sprite: Phaser.GameObjects.Sprite; text: Phaser.GameObjects.Text }> = new Map();
@@ -124,6 +130,15 @@ export class GameScene extends Phaser.Scene {
     // Camera
     this.cameras.main.startFollow(this.playerSprite, true, 0.1, 0.1);
     this.cameras.main.setZoom(1.5);
+
+    // Death overlay (hidden initially)
+    const cam = this.cameras.main;
+    this.deathOverlay = this.add.rectangle(cam.width / 2, cam.height / 2, cam.width + 200, cam.height + 200, 0x000000, 0.7)
+      .setScrollFactor(0).setDepth(9000).setVisible(false);
+    this.deathText = this.add.text(cam.width / 2, cam.height / 2 - 20, '', {
+      fontSize: '20px', color: '#ff4444', fontStyle: 'bold',
+      stroke: '#000', strokeThickness: 3,
+    }).setScrollFactor(0).setDepth(9001).setOrigin(0.5).setVisible(false);
 
     // --- Initialize all UI panels ---
     this.coordsText = this.add.text(10, 10, 'Pos: 0, 0', {
@@ -178,7 +193,7 @@ export class GameScene extends Phaser.Scene {
 
     // --- Input handling ---
     this.input.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
-      if (pointer.rightButtonDown()) return;
+      if (pointer.rightButtonDown() || this.isDead) return;
 
       const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
       const gridPos = screenToWorld(worldPoint.x, worldPoint.y);
@@ -245,6 +260,13 @@ export class GameScene extends Phaser.Scene {
   update(_time: number, delta: number): void {
     const speed = INTERPOLATION_SPEED * (delta / 16.67);
 
+    // Death timer countdown
+    if (this.isDead) {
+      this.respawnTimer -= delta / 1000;
+      const secs = Math.max(0, Math.ceil(this.respawnTimer));
+      this.deathText.setText(`💀 YOU DIED\nRespawning in ${secs}s...`);
+    }
+
     // Interpolate player
     this.playerGridX = Phaser.Math.Linear(this.playerGridX, this.targetGridX, speed);
     this.playerGridY = Phaser.Math.Linear(this.playerGridY, this.targetGridY, speed);
@@ -287,8 +309,8 @@ export class GameScene extends Phaser.Scene {
     // Attack cooldown
     if (this.attackCooldown > 0) this.attackCooldown -= delta;
 
-    // Auto-attack selected target
-    if (this.selectedEntityId && this.attackCooldown <= 0) {
+    // Auto-attack selected target (skip while dead)
+    if (this.selectedEntityId && this.attackCooldown <= 0 && !this.isDead) {
       const target = this.entities.get(this.selectedEntityId);
       if (target) {
         const dist = Math.sqrt(
@@ -338,6 +360,13 @@ export class GameScene extends Phaser.Scene {
         }
         this.updateRemoteEntity(entity);
       }
+
+      // Remove entities no longer visible from server
+      for (const [id] of this.entities) {
+        if (!seenIds.has(id)) {
+          this.removeEntity(id);
+        }
+      }
     });
 
     this.network.on(MessageType.PlayerLeft, (msg) => {
@@ -379,11 +408,15 @@ export class GameScene extends Phaser.Scene {
       }
     });
 
-    this.network.on(MessageType.Death, (msg) => {
-      const { killedBy } = msg.payload as { killedBy?: string };
-      const deathMsg = killedBy ? `💀 You were killed by ${killedBy}!` : '💀 You died!';
-      this.chatBox.addMessage('System', deathMsg, 'combat');
+    this.network.on(MessageType.Death, (_msg) => {
+      this.isDead = true;
+      this.respawnTimer = 5;
       this.selectedEntityId = null;
+      this.deathOverlay.setVisible(true);
+      this.deathText.setVisible(true);
+      this.deathText.setText('💀 YOU DIED\nRespawning in 5s...');
+      this.showDeathEffect(this.playerSprite.x, this.playerSprite.y);
+      this.chatBox.addMessage('System', '💀 You died! Respawning at town...', 'combat');
     });
 
     this.network.on(MessageType.ItemDrop, (msg) => {
@@ -393,9 +426,25 @@ export class GameScene extends Phaser.Scene {
     });
 
     this.network.on(MessageType.InventoryUpdate, (msg) => {
-      const { items } = msg.payload as { items: unknown[] };
-      // Update inventory UI with server data
-      this.chatBox.addSystemMessage(`Inventory updated (${items.length} items)`);
+      const payload = msg.payload as {
+        items: GameItem[];
+        equipment?: Array<{ slot: string; item: GameItem }>;
+        gold?: number;
+      };
+      // Sync inventory grid
+      const paddedItems: (GameItem | null)[] = new Array(40).fill(null);
+      for (let i = 0; i < payload.items.length && i < 40; i++) {
+        paddedItems[i] = payload.items[i];
+      }
+      this.inventoryUI.setItems(paddedItems);
+      // Sync equipment
+      if (payload.equipment) {
+        this.equipmentUI.setAllEquipment(payload.equipment);
+      }
+      // Sync gold
+      if (payload.gold !== undefined) {
+        this.inventoryUI.setGold(payload.gold);
+      }
     });
 
     this.network.on(MessageType.Respawn, (msg) => {
@@ -404,7 +453,10 @@ export class GameScene extends Phaser.Scene {
       this.targetGridY = y;
       this.playerGridX = x;
       this.playerGridY = y;
-      this.chatBox.addSystemMessage('You have respawned.');
+      this.isDead = false;
+      this.deathOverlay.setVisible(false);
+      this.deathText.setVisible(false);
+      this.chatBox.addSystemMessage('✅ You have respawned at town.');
     });
 
     // Ground items nearby
@@ -415,8 +467,8 @@ export class GameScene extends Phaser.Scene {
 
     // Bank contents update
     this.network.on(MessageType.BankUpdate, (msg) => {
-      const { items } = msg.payload as { items: unknown[] };
-      this.chatBox.addSystemMessage(`Bank updated (${items.length} items)`);
+      const { items } = msg.payload as { items: GameItem[] };
+      this.bankUI.setItems(items);
     });
 
     // Chat messages
@@ -632,7 +684,7 @@ export class GameScene extends Phaser.Scene {
         const screenPos = worldToScreen(wx, wy);
         const tile = this.add.image(screenPos.x, screenPos.y, tileKey);
         tile.setOrigin(0.5, 0.5);
-        tile.setDepth(screenPos.y);
+        tile.setDepth(screenPos.y - 10000);
         tiles.push(tile);
       }
     }
@@ -656,7 +708,7 @@ export class GameScene extends Phaser.Scene {
         const screenPos = worldToScreen(wx, wy);
         const tile = this.add.image(screenPos.x, screenPos.y, tileKey);
         tile.setOrigin(0.5, 0.5);
-        tile.setDepth(screenPos.y);
+        tile.setDepth(screenPos.y - 10000);
         tiles.push(tile);
       }
     }

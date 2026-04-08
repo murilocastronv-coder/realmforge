@@ -155,6 +155,7 @@ pub fn generate_enemy(x: f64, y: f64, zone_level: u32) -> EnemyData {
         target_player: None,
         rank,
         modifiers,
+        attack_cooldown: 0.0,
     }
 }
 
@@ -168,28 +169,48 @@ pub fn update_enemy_ai(
         return false;
     }
 
+    // Tick down attack cooldown
+    if enemy.attack_cooldown > 0.0 {
+        enemy.attack_cooldown -= 1.0;
+    }
+
+    // Town safe zone: enemies within 20 tiles of origin lose aggro
+    const SAFE_ZONE_RADIUS: f64 = 20.0;
+    let enemy_dist_from_origin = (enemy.x * enemy.x + enemy.y * enemy.y).sqrt();
+    if enemy_dist_from_origin < SAFE_ZONE_RADIUS {
+        if enemy.state == EnemyState::Chase || enemy.state == EnemyState::Attack {
+            enemy.state = EnemyState::Idle;
+            enemy.target_player = None;
+        }
+    }
+
     let speed = 1.5 * dt;
     let mut moved = false;
 
     match enemy.state {
         EnemyState::Idle => {
-            // Check for nearby players to aggro
-            for &(pid, px, py) in players {
-                let dist = ((enemy.x - px).powi(2) + (enemy.y - py).powi(2)).sqrt();
-                if dist < enemy.aggro_range {
-                    enemy.state = EnemyState::Chase;
-                    enemy.target_player = Some(pid);
-                    break;
+            // Only aggro if not in safe zone
+            if enemy_dist_from_origin >= SAFE_ZONE_RADIUS {
+                for &(pid, px, py) in players {
+                    // Don't aggro players inside safe zone
+                    let player_dist_origin = (px * px + py * py).sqrt();
+                    if player_dist_origin < SAFE_ZONE_RADIUS { continue; }
+
+                    let dist = ((enemy.x - px).powi(2) + (enemy.y - py).powi(2)).sqrt();
+                    if dist < enemy.aggro_range {
+                        enemy.state = EnemyState::Chase;
+                        enemy.target_player = Some(pid);
+                        break;
+                    }
                 }
             }
 
-            // Random chance to start patrolling
+            // Random patrol
             if enemy.state == EnemyState::Idle && rand::thread_rng().gen_bool(0.01) {
                 enemy.state = EnemyState::Patrol;
             }
         }
         EnemyState::Patrol => {
-            // Move toward patrol point
             let mut rng = rand::thread_rng();
             let target_x =
                 enemy.patrol_center_x + rng.gen_range(-enemy.patrol_radius..enemy.patrol_radius);
@@ -208,13 +229,18 @@ pub fn update_enemy_ai(
                 enemy.state = EnemyState::Idle;
             }
 
-            // Check for aggro
-            for &(pid, px, py) in players {
-                let pdist = ((enemy.x - px).powi(2) + (enemy.y - py).powi(2)).sqrt();
-                if pdist < enemy.aggro_range {
-                    enemy.state = EnemyState::Chase;
-                    enemy.target_player = Some(pid);
-                    break;
+            // Check aggro (only outside safe zone)
+            if enemy_dist_from_origin >= SAFE_ZONE_RADIUS {
+                for &(pid, px, py) in players {
+                    let player_dist_origin = (px * px + py * py).sqrt();
+                    if player_dist_origin < SAFE_ZONE_RADIUS { continue; }
+
+                    let pdist = ((enemy.x - px).powi(2) + (enemy.y - py).powi(2)).sqrt();
+                    if pdist < enemy.aggro_range {
+                        enemy.state = EnemyState::Chase;
+                        enemy.target_player = Some(pid);
+                        break;
+                    }
                 }
             }
         }
@@ -228,7 +254,6 @@ pub fn update_enemy_ai(
                     if dist < 1.5 {
                         enemy.state = EnemyState::Attack;
                     } else if dist > enemy.aggro_range * 2.0 {
-                        // Lost target
                         enemy.state = EnemyState::Idle;
                         enemy.target_player = None;
                     } else {
@@ -238,15 +263,12 @@ pub fn update_enemy_ai(
                         moved = true;
                     }
                 } else {
-                    // Target player disconnected
                     enemy.state = EnemyState::Idle;
                     enemy.target_player = None;
                 }
             }
         }
         EnemyState::Attack => {
-            // Attack logic handled by combat system
-            // Return to chase if target moved away
             if let Some(target_id) = enemy.target_player {
                 if let Some(&(_, px, py)) = players.iter().find(|(id, _, _)| *id == target_id) {
                     let dist =

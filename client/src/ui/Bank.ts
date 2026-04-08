@@ -71,6 +71,14 @@ export class BankUI {
     }
   }
 
+  setItems(items: (GameItem | null)[]): void {
+    this.items = new Array(BANK_COLS * BANK_ROWS).fill(null);
+    for (let i = 0; i < items.length && i < this.items.length; i++) {
+      this.items[i] = items[i];
+    }
+    this.refreshDisplay();
+  }
+
   deposit(item: GameItem): boolean {
     if (item.stackable) {
       const existing = this.items.findIndex(i => i && i.id === item.id);

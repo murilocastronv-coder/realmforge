@@ -467,6 +467,10 @@ async fn handle_auth(
         pid,
         state.players.len()
     );
+
+    // Send initial state to player
+    send_stats_update_by_id(state, &pid);
+    send_inventory_update(state, &pid);
 }
 
 fn get_or_generate_chunk(state: &Arc<AppState>, chunk_x: i32, chunk_y: i32) -> ChunkData {
@@ -1142,9 +1146,9 @@ fn update_dead_players(state: &Arc<AppState>) {
 fn process_enemy_attacks(state: &Arc<AppState>) {
     let mut attacks: Vec<(Uuid, Uuid, i32)> = Vec::new(); // (enemy_id, player_id, damage)
 
-    for entry in state.enemies.iter() {
-        let enemy = entry.value();
-        if enemy.state == EnemyState::Attack {
+    for mut entry in state.enemies.iter_mut() {
+        let enemy = entry.value_mut();
+        if enemy.state == EnemyState::Attack && enemy.attack_cooldown <= 0.0 {
             if let Some(target_id) = enemy.target_player {
                 if let Some(player) = state.players.get(&target_id) {
                     if !player.dead {
@@ -1153,6 +1157,7 @@ fn process_enemy_attacks(state: &Arc<AppState>) {
                         let def_reduction = def as f64 / (def as f64 + 100.0 + enemy.level as f64 * 2.0);
                         let final_damage = (raw_damage * (1.0 - def_reduction)).max(1.0) as i32;
                         attacks.push((enemy.id, target_id, final_damage));
+                        enemy.attack_cooldown = 30.0; // 1.5 seconds at 20 tps
                     }
                 }
             }

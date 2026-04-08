@@ -88,6 +88,15 @@ export class EquipmentUI {
     this.container.add(this.statsText);
   }
 
+  setAllEquipment(slots: Array<{ slot: string; item: GameItem }>): void {
+    this.equipped.clear();
+    for (const { slot, item } of slots) {
+      this.equipped.set(slot, item);
+      this.refreshSlot(slot);
+    }
+    this.updateStats();
+  }
+
   equip(slotId: string, item: GameItem): GameItem | null {
     const old = this.equipped.get(slotId) || null;
     this.equipped.set(slotId, item);

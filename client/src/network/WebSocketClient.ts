@@ -86,6 +86,8 @@ export class WebSocketClient {
   private _connected = false;
   private messageQueue: GameMessage[] = [];
   private lastAuthPayload: unknown = null;
+  // Buffer for messages received before handlers are registered
+  private pendingMessages: GameMessage[] = [];
 
   get connected(): boolean {
     return this._connected;
@@ -164,6 +166,17 @@ export class WebSocketClient {
       this.handlers.set(type, []);
     }
     this.handlers.get(type)!.push(handler);
+
+    // Replay any buffered messages for this type
+    const remaining: GameMessage[] = [];
+    for (const msg of this.pendingMessages) {
+      if (msg.type === type) {
+        handler(msg);
+      } else {
+        remaining.push(msg);
+      }
+    }
+    this.pendingMessages = remaining;
   }
 
   off(type: MessageType, handler: MessageHandler): void {
@@ -176,9 +189,14 @@ export class WebSocketClient {
 
   private dispatch(msg: GameMessage): void {
     const handlers = this.handlers.get(msg.type);
-    if (handlers) {
+    if (handlers && handlers.length > 0) {
       for (const handler of handlers) {
         handler(msg);
+      }
+    } else {
+      // Buffer message for late-registered handlers (max 100 to prevent leak)
+      if (this.pendingMessages.length < 100) {
+        this.pendingMessages.push(msg);
       }
     }
   }
