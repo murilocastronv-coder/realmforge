@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use rand::Rng;
 
 // ─── Message Types ───────────────────────────────────────────
@@ -17,6 +18,16 @@ pub const MSG_BANK_DEPOSIT: u8 = 9;
 pub const MSG_BANK_WITHDRAW: u8 = 10;
 pub const MSG_ATTACK_PLAYER: u8 = 11;
 pub const MSG_REQUEST_CHUNK: u8 = 12;
+pub const MSG_ALLOCATE_STATS: u8 = 13;
+pub const MSG_SELECT_CLASS: u8 = 14;
+pub const MSG_USE_SKILL: u8 = 15;
+pub const MSG_PARTY_ACTION: u8 = 16;
+pub const MSG_CHAT_COMMAND: u8 = 17;
+pub const MSG_TRADE_ACTION: u8 = 18;
+pub const MSG_QUEST_ACCEPT: u8 = 20;   // Client → Server: accept a quest
+pub const MSG_QUEST_TURN_IN: u8 = 21;  // Client → Server: turn in a completed quest
+pub const MSG_QUEST_LIST_REQUEST: u8 = 22; // Client → Server: request quest list
+pub const MSG_NPC_INTERACT: u8 = 23;   // Client → Server: interact with NPC
 
 // Server → Client
 pub const MSG_AUTH_RESULT: u8 = 50;
@@ -35,6 +46,20 @@ pub const MSG_RESPAWN: u8 = 62;
 pub const MSG_GROUND_ITEMS: u8 = 63;
 pub const MSG_BANK_UPDATE: u8 = 64;
 pub const MSG_XP_ORB_PICKUP: u8 = 65;
+pub const MSG_EFFECT_APPLIED: u8 = 66;
+pub const MSG_EFFECT_REMOVED: u8 = 67;
+pub const MSG_EFFECT_TICK: u8 = 68;
+pub const MSG_SKILL_RESULT: u8 = 69;
+pub const MSG_PARTY_UPDATE: u8 = 70;
+pub const MSG_PARTY_INVITE: u8 = 71;
+pub const MSG_TRADE_REQUEST: u8 = 72;
+pub const MSG_TRADE_UPDATE: u8 = 73;
+pub const MSG_QUEST_UPDATE: u8 = 80;   // Server → Client: quest progress update
+pub const MSG_QUEST_LIST: u8 = 81;     // Server → Client: available/active/completed quests
+pub const MSG_ACHIEVEMENT_UNLOCK: u8 = 82; // Server → Client: achievement unlocked
+pub const MSG_WORLD_BOSS_SPAWN: u8 = 83;   // Server → Client: world boss spawned
+pub const MSG_WORLD_BOSS_DEATH: u8 = 84;   // Server → Client: world boss defeated
+pub const MSG_NPC_DIALOGUE: u8 = 85;       // Server → Client: NPC dialogue data
 
 // ─── Message Envelope ────────────────────────────────────────
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -51,6 +76,8 @@ pub struct AuthPayload {
     pub password: String,
     #[serde(rename = "isRegister")]
     pub is_register: bool,
+    #[serde(default)]
+    pub class: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -84,6 +111,22 @@ pub struct ChatPayload {
 fn default_channel() -> String {
     "global".to_string()
 }
+
+// ─── Stat Allocation ─────────────────────────────────────────
+#[derive(Debug, Deserialize)]
+pub struct AllocateStatsPayload {
+    pub allocations: HashMap<String, u32>, // e.g. {"vitality": 2, "strength": 1}
+}
+
+// Stat allocation constants — points per allocation
+pub const STAT_VITALITY_HP: i32 = 12;   // +12 maxHP per point
+pub const STAT_ENDURANCE_MP: i32 = 8;   // +8 maxMP per point
+pub const STAT_STRENGTH_ATK: i32 = 3;   // +3 ATK per point
+pub const STAT_FORTITUDE_DEF: i32 = 3;  // +3 DEF per point
+pub const STAT_AGILITY_SPD: i32 = 2;    // +2 SPD per point
+pub const STAT_FORTUNE_LCK: i32 = 2;    // +2 LCK per point
+
+pub const VALID_STATS: &[&str] = &["vitality", "endurance", "strength", "fortitude", "agility", "fortune"];
 
 #[derive(Debug, Serialize)]
 pub struct ChatMessageOut {
@@ -130,6 +173,34 @@ pub struct ChunkData {
     pub biome: String,
 }
 
+// ─── Quest System ────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActiveQuest {
+    pub quest_id: String,
+    pub objectives_progress: Vec<u32>, // current count per objective
+    pub status: String,                // "active", "turnIn", "completed"
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct StatsTracker {
+    pub enemies_killed: u32,
+    pub enemies_killed_by_type: HashMap<String, u32>, // lowercase keyword -> count
+    pub items_crafted: u32,
+    pub items_collected: u32,
+    pub gold_earned: u64,
+    pub gold_spent: u64,
+    pub deaths: u32,
+    pub biomes_visited: HashSet<String>,
+    pub quests_completed: u32,
+    pub boss_kills: u32,
+    pub champion_kills: u32,
+    pub elite_kills: u32,
+    pub pvp_kills: u32,
+    pub trades_completed: u32,
+    pub highest_hit: i32,
+}
+
 // ─── Player Data ─────────────────────────────────────────────
 #[derive(Debug, Clone)]
 pub struct PlayerData {
@@ -156,10 +227,23 @@ pub struct PlayerData {
     pub dead: bool,
     pub respawn_timer: f64,
     pub pvp_protection: bool, // true if level < 10
+    pub stat_points: u32,     // unspent stat points
+    pub class: String,        // warrior, mage, ranger, rogue
+    pub active_effects: Vec<ActiveEffect>,
+    // Quest & Achievement tracking
+    pub active_quests: Vec<ActiveQuest>,
+    pub completed_quests: Vec<String>,
+    pub achievements: Vec<String>,   // unlocked achievement IDs
+    pub achievement_progress: HashMap<String, u32>, // achievement_id -> progress count
+    pub stats_tracker: StatsTracker, // lifetime stats for achievements/quests
 }
 
 impl PlayerData {
     pub fn new(username: String) -> Self {
+        Self::new_with_class(username, "warrior".to_string())
+    }
+
+    pub fn new_with_class(username: String, class: String) -> Self {
         let id = Uuid::new_v4();
         // Give starter items
         let mut inventory = vec![None; 40]; // 8x5 grid
@@ -168,15 +252,27 @@ impl PlayerData {
         inventory[2] = Some(Item::new_consumable("Health Potion", 0, 5));
         inventory[3] = Some(Item::new_consumable("Health Potion", 0, 5));
 
+        // Base stats
+        let (mut hp, mut mp, mut atk, mut def, mut spd, mut lck) = (200, 80, 15, 10, 12, 5);
+
+        // Class bonuses
+        match class.as_str() {
+            "warrior" => { hp += 40; atk += 5; def += 8; }
+            "mage"    => { mp += 40; lck += 5; spd += 3; hp -= 20; }
+            "ranger"  => { hp += 10; atk += 3; spd += 6; lck += 3; }
+            "rogue"   => { atk += 5; spd += 5; lck += 6; def -= 2; }
+            _         => {} // default/unknown = no bonus
+        }
+
         Self {
             id,
             username,
             x: 0.0, y: 0.0,
             target_x: 0.0, target_y: 0.0,
-            hp: 200, max_hp: 200,
-            mp: 80, max_mp: 80,
+            hp, max_hp: hp,
+            mp, max_mp: mp,
             level: 1, xp: 0,
-            atk: 15, def: 10, spd: 12, lck: 5,
+            atk, def, spd, lck,
             gold: 100,
             inventory,
             equipment: HashMap::new(),
@@ -184,6 +280,14 @@ impl PlayerData {
             dead: false,
             respawn_timer: 0.0,
             pvp_protection: true,
+            stat_points: 5, // starting stat points for customization
+            class,
+            active_effects: Vec::new(),
+            active_quests: Vec::new(),
+            completed_quests: Vec::new(),
+            achievements: Vec::new(),
+            achievement_progress: HashMap::new(),
+            stats_tracker: StatsTracker::default(),
         }
     }
 
@@ -204,8 +308,11 @@ impl PlayerData {
 
     pub fn xp_to_next_level(&self) -> u64 {
         let level = self.level as f64;
-        let scaling = 1.0 + level / 100.0;
-        (100.0 * level.powf(2.5) * scaling) as u64
+        // Infinite scaling: base * level^2.5 * (1 + level/100) * log(level+1)
+        let base_xp = 100.0 * level.powf(2.5);
+        let linear_scaling = 1.0 + level / 100.0;
+        let log_scaling = (level + 1.0).ln().max(1.0);
+        (base_xp * linear_scaling * log_scaling) as u64
     }
 
     /// Total ATK including equipment bonuses
@@ -252,15 +359,81 @@ impl PlayerData {
     /// Get serializable inventory for client
     pub fn inventory_payload(&self) -> Vec<serde_json::Value> {
         self.inventory.iter().enumerate().filter_map(|(i, slot)| {
-            slot.as_ref().map(|item| item.to_json(i))
+            slot.as_ref().map(|item| item.to_slotted_payload(i))
         }).collect()
     }
 
     /// Get serializable bank for client
     pub fn bank_payload(&self) -> Vec<serde_json::Value> {
         self.bank.iter().enumerate().filter_map(|(i, slot)| {
-            slot.as_ref().map(|item| item.to_json(i))
+            slot.as_ref().map(|item| item.to_slotted_payload(i))
         }).collect()
+    }
+
+    /// Apply a status effect, replacing existing effect of same type if new one is stronger
+    pub fn apply_effect(&mut self, effect: ActiveEffect) {
+        // Replace existing effect of same type if new duration/value is greater
+        if let Some(existing) = self.active_effects.iter_mut().find(|e| e.effect_type == effect.effect_type) {
+            if effect.remaining_ticks >= existing.remaining_ticks || effect.value.abs() > existing.value.abs() {
+                *existing = effect;
+            }
+            return;
+        }
+        self.active_effects.push(effect);
+    }
+
+    /// Remove all effects of a given type
+    pub fn remove_effect(&mut self, effect_type: &StatusEffectType) {
+        self.active_effects.retain(|e| &e.effect_type != effect_type);
+    }
+
+    /// Check if player has a specific effect
+    pub fn has_effect(&self, effect_type: &StatusEffectType) -> bool {
+        self.active_effects.iter().any(|e| e.effect_type == *effect_type)
+    }
+
+    /// Get total ATK modifier from active effects
+    pub fn effect_atk_modifier(&self) -> i32 {
+        let mut modifier = 0;
+        for effect in &self.active_effects {
+            match effect.effect_type {
+                StatusEffectType::Strength => modifier += effect.value,
+                StatusEffectType::Weakness => modifier -= effect.value,
+                _ => {}
+            }
+        }
+        modifier
+    }
+
+    /// Get total DEF modifier from active effects
+    pub fn effect_def_modifier(&self) -> i32 {
+        let mut modifier = 0;
+        for effect in &self.active_effects {
+            match effect.effect_type {
+                StatusEffectType::ArmorBreak => modifier -= effect.value,
+                _ => {}
+            }
+        }
+        modifier
+    }
+
+    /// Get movement speed multiplier from effects (1.0 = normal)
+    pub fn effect_speed_multiplier(&self) -> f64 {
+        let mut mult = 1.0;
+        for effect in &self.active_effects {
+            match effect.effect_type {
+                StatusEffectType::Freeze => mult *= 0.4,
+                StatusEffectType::Haste => mult *= 1.5,
+                StatusEffectType::Stun => mult *= 0.0,
+                _ => {}
+            }
+        }
+        mult
+    }
+
+    /// Get active effects as payload for client
+    pub fn effects_payload(&self) -> Vec<serde_json::Value> {
+        self.active_effects.iter().map(|e| e.to_payload()).collect()
     }
 }
 
@@ -285,6 +458,14 @@ pub enum EnemyModifier {
     Reflector,   // 20% damage reflected
     Swift,       // +60% SPD
     Thorns,      // Deals flat damage back
+    Freezing,    // Slows players
+    Burning,     // DoT fire damage
+    Teleporter,  // Blinks around
+    Shielded,    // Periodic invulnerability
+    Berserker,   // Gets stronger at low HP
+    Draining,    // Steals MP
+    Poisonous,   // Applies poison DoT
+    Undying,     // Revives once
 }
 
 pub const ALL_MODIFIERS: &[EnemyModifier] = &[
@@ -297,6 +478,14 @@ pub const ALL_MODIFIERS: &[EnemyModifier] = &[
     EnemyModifier::Reflector,
     EnemyModifier::Swift,
     EnemyModifier::Thorns,
+    EnemyModifier::Freezing,
+    EnemyModifier::Burning,
+    EnemyModifier::Teleporter,
+    EnemyModifier::Shielded,
+    EnemyModifier::Berserker,
+    EnemyModifier::Draining,
+    EnemyModifier::Poisonous,
+    EnemyModifier::Undying,
 ];
 
 #[derive(Debug, Clone)]
@@ -320,6 +509,7 @@ pub struct EnemyData {
     pub rank: EnemyRank,
     pub modifiers: Vec<EnemyModifier>,
     pub attack_cooldown: f64,
+    pub flee_cooldown: f64, // ticks before enemy can re-aggro after fleeing
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -329,6 +519,77 @@ pub enum EnemyState {
     Chase,
     Attack,
     Dead,
+    Flee,   // retreating away from town safe zone
+}
+
+// ─── Status Effects ──────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum StatusEffectType {
+    Poison,       // DoT damage over time (green)
+    Burn,         // DoT fire damage (orange)
+    Bleed,        // DoT physical damage (red)
+    Freeze,       // Slow movement speed (ice blue)
+    Stun,         // Cannot move or attack (yellow)
+    Weakness,     // Reduced ATK (purple)
+    ArmorBreak,   // Reduced DEF (brown)
+    Regen,        // Heal over time (green glow)
+    Strength,     // Increased ATK (red glow)
+    Shield,       // Damage absorption (blue glow)
+    Haste,        // Increased movement speed (cyan)
+    Lifesteal,    // Heal % of damage dealt (crimson)
+    Thorns,       // Reflect damage back (gold)
+    Invulnerable, // Cannot take damage (white glow)
+}
+
+#[derive(Debug, Clone)]
+pub struct ActiveEffect {
+    pub effect_type: StatusEffectType,
+    pub value: i32,            // damage per tick, heal per tick, stat modifier amount, etc
+    pub remaining_ticks: u32,  // ticks remaining (20 ticks = 1 second)
+    pub tick_interval: u32,    // apply value every N ticks (e.g., 20 = once per second)
+    pub ticks_since_last: u32, // counter for tick_interval
+    pub source: String,        // "enemy", "potion", "aura", etc
+}
+
+impl ActiveEffect {
+    pub fn new(effect_type: StatusEffectType, value: i32, duration_ticks: u32, tick_interval: u32, source: &str) -> Self {
+        Self {
+            effect_type,
+            value,
+            remaining_ticks: duration_ticks,
+            tick_interval,
+            ticks_since_last: 0,
+            source: source.to_string(),
+        }
+    }
+
+    /// Returns true if this effect should apply its value this tick
+    pub fn should_tick(&self) -> bool {
+        self.ticks_since_last >= self.tick_interval
+    }
+
+    /// Advance the effect by one game tick. Returns true if expired.
+    pub fn advance(&mut self) -> bool {
+        if self.remaining_ticks == 0 {
+            return true;
+        }
+        self.remaining_ticks -= 1;
+        self.ticks_since_last += 1;
+        if self.ticks_since_last >= self.tick_interval {
+            self.ticks_since_last = 0;
+        }
+        self.remaining_ticks == 0
+    }
+
+    pub fn to_payload(&self) -> serde_json::Value {
+        serde_json::json!({
+            "effectType": format!("{:?}", self.effect_type),
+            "value": self.value,
+            "remainingMs": self.remaining_ticks * 50, // 50ms per tick
+            "source": self.source,
+        })
+    }
 }
 
 impl EnemyData {
@@ -455,9 +716,8 @@ impl Item {
         }
     }
 
-    pub fn to_json(&self, slot_index: usize) -> serde_json::Value {
+    pub fn to_payload(&self) -> serde_json::Value {
         serde_json::json!({
-            "slotIndex": slot_index,
             "id": self.id,
             "templateId": self.template_id,
             "name": self.name,
@@ -471,6 +731,16 @@ impl Item {
             "description": self.description,
             "affixes": self.affixes,
         })
+    }
+
+    pub fn to_slotted_payload(&self, slot_index: usize) -> serde_json::Value {
+        let mut payload = self.to_payload();
+
+        if let Some(object) = payload.as_object_mut() {
+            object.insert("slotIndex".to_string(), serde_json::json!(slot_index));
+        }
+
+        payload
     }
 }
 
@@ -501,30 +771,110 @@ const WEAPON_TEMPLATES: &[(&str, &str)] = &[
     ("Crystal Dagger", "weapon"),
     ("Shadow Bow", "weapon"),
     ("Flame Mace", "weapon"),
+    ("Mithril Rapier", "weapon"),
+    ("Dragon Fang", "weapon"),
+    ("Thunder Hammer", "weapon"),
+    ("Void Scythe", "weapon"),
+    ("Blessed Spear", "weapon"),
+    ("Frost Wand", "weapon"),
+    ("Adamantite Claymore", "weapon"),
+    ("Void Dagger", "weapon"),
+    ("Celestial Bow", "weapon"),
+    ("Runic Battleaxe", "weapon"),
+    ("Obsidian Katana", "weapon"),
+    ("Arcane Scepter", "weapon"),
+    ("Phoenix Lance", "weapon"),
+    ("Abyssal Trident", "weapon"),
+    ("Storm Halberd", "weapon"),
+    ("Infernal Greatsword", "weapon"),
+    ("Frost Glaive", "weapon"),
+    ("Divine Blade", "weapon"),
+    ("Chaos Maul", "weapon"),
+    ("Eldritch Tome", "weapon"),
+    ("Primordial Staff", "weapon"),
+    ("Doom Crossbow", "weapon"),
+    ("Spectral Katars", "weapon"),
+    ("Mythic Warhammer", "weapon"),
 ];
 
 const ARMOR_TEMPLATES: &[(&str, &str)] = &[
     ("Leather Cap", "helmet"),
     ("Iron Helm", "helmet"),
+    ("Mithril Crown", "helmet"),
+    ("Dragon Helm", "helmet"),
     ("Cloth Shirt", "armor"),
     ("Chain Mail", "armor"),
     ("Plate Armor", "armor"),
+    ("Mithril Armor", "armor"),
+    ("Dragon Plate", "armor"),
     ("Leather Pants", "legs"),
     ("Iron Greaves", "legs"),
+    ("Mithril Greaves", "legs"),
     ("Leather Boots", "boots"),
     ("Iron Boots", "boots"),
+    ("Winged Boots", "boots"),
     ("Wooden Shield", "shield"),
     ("Iron Shield", "shield"),
+    ("Tower Shield", "shield"),
     ("Silver Ring", "ring1"),
     ("Gold Ring", "ring2"),
+    ("Emerald Ring", "ring1"),
+    ("Ruby Ring", "ring2"),
     ("Bone Amulet", "amulet"),
+    ("Phoenix Amulet", "amulet"),
     ("Silk Cape", "cape"),
+    ("Shadow Cloak", "cape"),
+    // Helmets
+    ("Steel Helm", "helmet"),
+    ("Adamantite Crown", "helmet"),
+    ("Void Mask", "helmet"),
+    ("Celestial Circlet", "helmet"),
+    // Armor
+    ("Adamantite Plate", "armor"),
+    ("Shadow Vestments", "armor"),
+    ("Celestial Robe", "armor"),
+    ("Void Cuirass", "armor"),
+    ("Runic Chainmail", "armor"),
+    // Legs
+    ("Adamantite Greaves", "legs"),
+    ("Shadow Leggings", "legs"),
+    ("Celestial Cuisses", "legs"),
+    ("Void Tassets", "legs"),
+    // Boots
+    ("Adamantite Sabatons", "boots"),
+    ("Shadow Treads", "boots"),
+    ("Celestial Sandals", "boots"),
+    ("Void Boots", "boots"),
+    // Shields
+    ("Adamantite Bulwark", "shield"),
+    ("Void Aegis", "shield"),
+    ("Celestial Ward", "shield"),
+    // Rings
+    ("Sapphire Ring", "ring1"),
+    ("Diamond Ring", "ring2"),
+    ("Void Band", "ring1"),
+    ("Celestial Loop", "ring2"),
+    // Amulets
+    ("Diamond Amulet", "amulet"),
+    ("Void Pendant", "amulet"),
+    ("Celestial Talisman", "amulet"),
+    // Capes
+    ("Void Mantle", "cape"),
+    ("Celestial Wings", "cape"),
+    ("Dragon Cloak", "cape"),
 ];
 
 const MATERIAL_NAMES: &[&str] = &[
     "Wood", "Iron Ore", "Leather", "Thread", "Herb",
     "Steel Ingot", "Gold Dust", "Crystal Shard", "Dragon Scale",
     "Monster Fang", "Spider Silk", "Ancient Bone",
+    "Mithril Ore", "Gem Shard", "Phoenix Feather", "Dark Essence",
+    "Enchanted Cloth", "Sapphire Fragment", "Volcanic Ash",
+    "Adamantite Ore", "Void Shard", "Celestial Dust", "Shadow Essence",
+    "Runic Fragment", "Primordial Core", "Chaos Crystal", "Abyssal Pearl",
+    "Phoenix Ash", "Frost Crystal", "Thunder Stone", "Mythic Ingot",
+    "Soul Fragment", "Ancient Relic", "Titan Bone", "Ethereal Thread",
+    "Demon Horn", "Angel Feather", "Obsidian Shard", "Star Fragment",
 ];
 
 const AFFIX_PREFIXES: &[(&str, &str, f64)] = &[
@@ -536,6 +886,18 @@ const AFFIX_PREFIXES: &[(&str, &str, f64)] = &[
     ("Arcane", "MP", 0.12),
     ("Heavy", "ATK", 0.20),
     ("Sturdy", "DEF", 0.20),
+    ("Brutal", "ATK", 0.25),
+    ("Titanium", "DEF", 0.22),
+    ("Blazing", "ATK", 0.18),
+    ("Frozen", "DEF", 0.16),
+    ("Ancient", "HP", 0.18),
+    ("Mystic", "MP", 0.20),
+    ("Relentless", "SPD", 0.15),
+    ("Blessed", "LCK", 0.18),
+    ("Chaotic", "ATK", 0.30),
+    ("Vampiric", "HP", 0.15),
+    ("Ethereal", "SPD", 0.12),
+    ("Void-touched", "ATK", 0.22),
 ];
 
 const AFFIX_SUFFIXES: &[(&str, &str, f64)] = &[
@@ -547,6 +909,18 @@ const AFFIX_SUFFIXES: &[(&str, &str, f64)] = &[
     ("of Power", "ATK", 0.25),
     ("of the Guardian", "DEF", 0.25),
     ("of Mana", "MP", 0.18),
+    ("of the Phoenix", "HP", 0.22),
+    ("of the Void", "ATK", 0.28),
+    ("of the Ancients", "DEF", 0.22),
+    ("of Thunder", "SPD", 0.18),
+    ("of the Titan", "HP", 0.30),
+    ("of Chaos", "ATK", 0.35),
+    ("of the Stars", "LCK", 0.25),
+    ("of Eternity", "DEF", 0.30),
+    ("of the Abyss", "ATK", 0.20),
+    ("of Wisdom", "MP", 0.22),
+    ("of the Celestial", "LCK", 0.20),
+    ("of Annihilation", "ATK", 0.40),
 ];
 
 pub fn generate_loot(zone_level: u32, enemy_level: u32, luck_bonus: i32) -> Vec<Item> {
@@ -707,3 +1081,288 @@ pub fn pvp_death_drops(player: &mut PlayerData) -> (Vec<Item>, u64) {
 
     (dropped, gold_drop)
 }
+
+// ─── Quest Catalog ───────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct QuestDef {
+    pub id: &'static str,
+    pub title: &'static str,
+    pub description: &'static str,
+    pub icon: &'static str,
+    pub min_level: u32,
+    pub prerequisites: &'static [&'static str],
+    pub objectives: &'static [QuestObjDef],
+    pub reward_xp: u64,
+    pub reward_gold: u64,
+    pub reward_items: &'static [(&'static str, u32, u32)], // (name, rarity, level)
+}
+
+#[derive(Debug, Clone)]
+pub struct QuestObjDef {
+    pub description: &'static str,
+    pub obj_type: &'static str, // "kill", "kill_type", "collect", "craft", "level", "gold", "equip", "visit_biome", "kill_rank"
+    pub target: &'static str,   // enemy keyword, item name, level num, biome name, rank name
+    pub count: u32,
+}
+
+pub static QUEST_CATALOG: &[QuestDef] = &[
+    // === Starter Chain (Lv 1-5) ===
+    QuestDef {
+        id: "first_blood", title: "First Blood", icon: "⚔️",
+        description: "Prove your worth by defeating enemies in the wild.",
+        min_level: 1, prerequisites: &[],
+        objectives: &[QuestObjDef { description: "Kill 3 enemies", obj_type: "kill", target: "", count: 3 }],
+        reward_xp: 50, reward_gold: 30, reward_items: &[],
+    },
+    QuestDef {
+        id: "slime_hunter", title: "Slime Hunter", icon: "🟢",
+        description: "The forest is overrun with slimes. Thin their numbers!",
+        min_level: 1, prerequisites: &["first_blood"],
+        objectives: &[QuestObjDef { description: "Kill 5 Slimes", obj_type: "kill_type", target: "slime", count: 5 }],
+        reward_xp: 100, reward_gold: 60, reward_items: &[],
+    },
+    QuestDef {
+        id: "growing_stronger", title: "Growing Stronger", icon: "⭐",
+        description: "Train and grow your power. Reach level 3.",
+        min_level: 1, prerequisites: &[],
+        objectives: &[QuestObjDef { description: "Reach Level 3", obj_type: "level", target: "3", count: 1 }],
+        reward_xp: 150, reward_gold: 100, reward_items: &[],
+    },
+    QuestDef {
+        id: "suit_up", title: "Suit Up", icon: "🛡️",
+        description: "Equip a piece of armor to protect yourself.",
+        min_level: 1, prerequisites: &[],
+        objectives: &[QuestObjDef { description: "Equip any armor", obj_type: "equip", target: "", count: 1 }],
+        reward_xp: 75, reward_gold: 40, reward_items: &[],
+    },
+    QuestDef {
+        id: "apprentice_crafter", title: "Apprentice Crafter", icon: "🔨",
+        description: "Learn the art of crafting by creating items at the forge.",
+        min_level: 2, prerequisites: &[],
+        objectives: &[QuestObjDef { description: "Craft 3 items", obj_type: "craft", target: "", count: 3 }],
+        reward_xp: 120, reward_gold: 80, reward_items: &[],
+    },
+
+    // === Mid Chain (Lv 5-15) ===
+    QuestDef {
+        id: "skeleton_scourge", title: "Skeleton Scourge", icon: "💀",
+        description: "The undead grow restless. Destroy the skeletons plaguing the land.",
+        min_level: 5, prerequisites: &["first_blood"],
+        objectives: &[QuestObjDef { description: "Kill 10 Skeletons", obj_type: "kill_type", target: "skeleton", count: 10 }],
+        reward_xp: 300, reward_gold: 200, reward_items: &[],
+    },
+    QuestDef {
+        id: "wolf_pack", title: "Wolf Pack Menace", icon: "🐺",
+        description: "Wolves are attacking travelers. Hunt them down.",
+        min_level: 5, prerequisites: &["first_blood"],
+        objectives: &[QuestObjDef { description: "Kill 8 Wolves", obj_type: "kill_type", target: "wolf", count: 8 }],
+        reward_xp: 250, reward_gold: 180, reward_items: &[],
+    },
+    QuestDef {
+        id: "gold_hoarder", title: "Gold Hoarder", icon: "💰",
+        description: "Accumulate wealth to fund your adventures.",
+        min_level: 3, prerequisites: &[],
+        objectives: &[QuestObjDef { description: "Have 500 gold", obj_type: "gold", target: "500", count: 1 }],
+        reward_xp: 200, reward_gold: 100, reward_items: &[],
+    },
+    QuestDef {
+        id: "explorer", title: "Explorer", icon: "🗺️",
+        description: "Venture into different biomes to discover the world.",
+        min_level: 5, prerequisites: &[],
+        objectives: &[QuestObjDef { description: "Visit 4 different biomes", obj_type: "visit_biome", target: "", count: 4 }],
+        reward_xp: 350, reward_gold: 200, reward_items: &[],
+    },
+    QuestDef {
+        id: "demon_slayer", title: "Demon Slayer", icon: "😈",
+        description: "Dark forces have sent demons into the realm. Banish them!",
+        min_level: 8, prerequisites: &["skeleton_scourge"],
+        objectives: &[QuestObjDef { description: "Kill 5 Demons", obj_type: "kill_type", target: "demon", count: 5 }],
+        reward_xp: 500, reward_gold: 300, reward_items: &[("Iron Sword", 1, 8)],
+    },
+    QuestDef {
+        id: "seasoned_warrior", title: "Seasoned Warrior", icon: "⚔️",
+        description: "Battle your way to level 10 and prove your dedication.",
+        min_level: 5, prerequisites: &["growing_stronger"],
+        objectives: &[QuestObjDef { description: "Reach Level 10", obj_type: "level", target: "10", count: 1 }],
+        reward_xp: 500, reward_gold: 300, reward_items: &[],
+    },
+
+    // === Advanced Chain (Lv 15+) ===
+    QuestDef {
+        id: "champion_hunter", title: "Champion Hunter", icon: "🏆",
+        description: "Seek out and destroy powerful champion-ranked enemies.",
+        min_level: 10, prerequisites: &["seasoned_warrior"],
+        objectives: &[QuestObjDef { description: "Kill 10 Champion enemies", obj_type: "kill_rank", target: "champion", count: 10 }],
+        reward_xp: 800, reward_gold: 500, reward_items: &[],
+    },
+    QuestDef {
+        id: "master_crafter", title: "Master Crafter", icon: "⚒️",
+        description: "Your forging skills are growing. Create many more items.",
+        min_level: 10, prerequisites: &["apprentice_crafter"],
+        objectives: &[QuestObjDef { description: "Craft 15 items", obj_type: "craft", target: "", count: 15 }],
+        reward_xp: 600, reward_gold: 400, reward_items: &[],
+    },
+    QuestDef {
+        id: "elite_slayer", title: "Elite Slayer", icon: "💎",
+        description: "Only the strongest can challenge elite enemies. Are you ready?",
+        min_level: 15, prerequisites: &["champion_hunter"],
+        objectives: &[QuestObjDef { description: "Kill 5 Elite enemies", obj_type: "kill_rank", target: "elite", count: 5 }],
+        reward_xp: 1200, reward_gold: 800, reward_items: &[("Steel Blade", 2, 15)],
+    },
+    QuestDef {
+        id: "veteran", title: "Veteran Adventurer", icon: "🌟",
+        description: "Reach level 20 and cement your legacy in RealmForge.",
+        min_level: 15, prerequisites: &["seasoned_warrior"],
+        objectives: &[QuestObjDef { description: "Reach Level 20", obj_type: "level", target: "20", count: 1 }],
+        reward_xp: 2000, reward_gold: 1000, reward_items: &[],
+    },
+    QuestDef {
+        id: "boss_hunter", title: "Boss Hunter", icon: "👑",
+        description: "Face the ultimate challenge. Defeat a boss-rank enemy!",
+        min_level: 15, prerequisites: &["elite_slayer"],
+        objectives: &[QuestObjDef { description: "Kill a Boss enemy", obj_type: "kill_rank", target: "boss", count: 1 }],
+        reward_xp: 3000, reward_gold: 2000, reward_items: &[("Mithril Sword", 3, 20)],
+    },
+    QuestDef {
+        id: "spider_nest", title: "Spider Nest", icon: "🕷️",
+        description: "A nest of deadly spiders threatens the mountainside. Exterminate them!",
+        min_level: 7, prerequisites: &["first_blood"],
+        objectives: &[QuestObjDef { description: "Kill 8 Spiders", obj_type: "kill_type", target: "spider", count: 8 }],
+        reward_xp: 280, reward_gold: 170, reward_items: &[],
+    },
+    QuestDef {
+        id: "undead_purge", title: "Undead Purge", icon: "☠️",
+        description: "Wraiths and zombies roam the swamplands. Purify the corrupted!",
+        min_level: 10, prerequisites: &["skeleton_scourge"],
+        objectives: &[
+            QuestObjDef { description: "Kill 6 Wraiths", obj_type: "kill_type", target: "wraith", count: 6 },
+            QuestObjDef { description: "Kill 6 Zombies", obj_type: "kill_type", target: "zombie", count: 6 },
+        ],
+        reward_xp: 600, reward_gold: 350, reward_items: &[],
+    },
+    QuestDef {
+        id: "mass_slaughter", title: "Mass Slaughter", icon: "🔥",
+        description: "Prove your combat mastery by slaying a hundred foes.",
+        min_level: 10, prerequisites: &[],
+        objectives: &[QuestObjDef { description: "Kill 100 enemies (total)", obj_type: "kill", target: "", count: 100 }],
+        reward_xp: 1500, reward_gold: 800, reward_items: &[],
+    },
+];
+
+// ─── Achievement Catalog ─────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct AchievementDef {
+    pub id: &'static str,
+    pub title: &'static str,
+    pub description: &'static str,
+    pub icon: &'static str,
+    pub category: &'static str, // "combat", "exploration", "crafting", "social", "progression"
+    pub tracker: &'static str,  // which stats_tracker field to check
+    pub target: u32,
+}
+
+pub static ACHIEVEMENT_CATALOG: &[AchievementDef] = &[
+    // === Combat ===
+    AchievementDef { id: "first_kill", title: "First Kill", description: "Defeat your first enemy.", icon: "⚔️", category: "combat", tracker: "enemies_killed", target: 1 },
+    AchievementDef { id: "killer_10", title: "Warrior", description: "Defeat 10 enemies.", icon: "⚔️", category: "combat", tracker: "enemies_killed", target: 10 },
+    AchievementDef { id: "killer_50", title: "Slayer", description: "Defeat 50 enemies.", icon: "⚔️", category: "combat", tracker: "enemies_killed", target: 50 },
+    AchievementDef { id: "killer_100", title: "Decimator", description: "Defeat 100 enemies.", icon: "💀", category: "combat", tracker: "enemies_killed", target: 100 },
+    AchievementDef { id: "killer_500", title: "Annihilator", description: "Defeat 500 enemies.", icon: "☠️", category: "combat", tracker: "enemies_killed", target: 500 },
+    AchievementDef { id: "killer_1000", title: "Legend of War", description: "Defeat 1000 enemies.", icon: "👑", category: "combat", tracker: "enemies_killed", target: 1000 },
+    AchievementDef { id: "boss_kill_1", title: "Boss Slayer", description: "Defeat a boss-rank enemy.", icon: "👑", category: "combat", tracker: "boss_kills", target: 1 },
+    AchievementDef { id: "boss_kill_5", title: "Boss Hunter", description: "Defeat 5 boss-rank enemies.", icon: "🏆", category: "combat", tracker: "boss_kills", target: 5 },
+    AchievementDef { id: "champion_5", title: "Champion Crusher", description: "Defeat 5 champions.", icon: "🏅", category: "combat", tracker: "champion_kills", target: 5 },
+    AchievementDef { id: "elite_5", title: "Elite Destroyer", description: "Defeat 5 elite enemies.", icon: "💎", category: "combat", tracker: "elite_kills", target: 5 },
+    AchievementDef { id: "pvp_first", title: "PvP Initiate", description: "Win your first PvP battle.", icon: "🗡️", category: "combat", tracker: "pvp_kills", target: 1 },
+
+    // === Progression ===
+    AchievementDef { id: "level_5", title: "Apprentice", description: "Reach level 5.", icon: "⭐", category: "progression", tracker: "level", target: 5 },
+    AchievementDef { id: "level_10", title: "Journeyman", description: "Reach level 10.", icon: "⭐", category: "progression", tracker: "level", target: 10 },
+    AchievementDef { id: "level_20", title: "Veteran", description: "Reach level 20.", icon: "🌟", category: "progression", tracker: "level", target: 20 },
+    AchievementDef { id: "level_30", title: "Master", description: "Reach level 30.", icon: "💫", category: "progression", tracker: "level", target: 30 },
+    AchievementDef { id: "level_50", title: "Grandmaster", description: "Reach level 50.", icon: "👑", category: "progression", tracker: "level", target: 50 },
+    AchievementDef { id: "quest_1", title: "Questor", description: "Complete your first quest.", icon: "📜", category: "progression", tracker: "quests_completed", target: 1 },
+    AchievementDef { id: "quest_5", title: "Adventurer", description: "Complete 5 quests.", icon: "📜", category: "progression", tracker: "quests_completed", target: 5 },
+    AchievementDef { id: "quest_10", title: "Hero", description: "Complete 10 quests.", icon: "🦸", category: "progression", tracker: "quests_completed", target: 10 },
+
+    // === Crafting ===
+    AchievementDef { id: "craft_1", title: "First Craft", description: "Craft your first item.", icon: "🔨", category: "crafting", tracker: "items_crafted", target: 1 },
+    AchievementDef { id: "craft_10", title: "Craftsman", description: "Craft 10 items.", icon: "🔨", category: "crafting", tracker: "items_crafted", target: 10 },
+    AchievementDef { id: "craft_50", title: "Master Smith", description: "Craft 50 items.", icon: "⚒️", category: "crafting", tracker: "items_crafted", target: 50 },
+
+    // === Exploration ===
+    AchievementDef { id: "biome_2", title: "Wanderer", description: "Visit 2 different biomes.", icon: "🗺️", category: "exploration", tracker: "biomes_visited", target: 2 },
+    AchievementDef { id: "biome_4", title: "Explorer", description: "Visit 4 different biomes.", icon: "🧭", category: "exploration", tracker: "biomes_visited", target: 4 },
+    AchievementDef { id: "biome_7", title: "World Traveler", description: "Visit all 7 biomes.", icon: "🌍", category: "exploration", tracker: "biomes_visited", target: 7 },
+    AchievementDef { id: "death_1", title: "First Death", description: "Die for the first time.", icon: "💀", category: "exploration", tracker: "deaths", target: 1 },
+    AchievementDef { id: "death_10", title: "Persistant Soul", description: "Die 10 times. Never give up!", icon: "👻", category: "exploration", tracker: "deaths", target: 10 },
+
+    // === Economy/Social ===
+    AchievementDef { id: "gold_1k", title: "Wealthy", description: "Earn 1,000 gold total.", icon: "💰", category: "social", tracker: "gold_earned", target: 1000 },
+    AchievementDef { id: "gold_10k", title: "Rich", description: "Earn 10,000 gold total.", icon: "💎", category: "social", tracker: "gold_earned", target: 10000 },
+    AchievementDef { id: "trade_1", title: "Trader", description: "Complete your first trade.", icon: "🤝", category: "social", tracker: "trades_completed", target: 1 },
+    AchievementDef { id: "collect_50", title: "Collector", description: "Pick up 50 items.", icon: "🎒", category: "social", tracker: "items_collected", target: 50 },
+];
+
+// ─── World Boss Definitions ──────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct WorldBossDef {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub title: &'static str,
+    pub spawn_x: f64,
+    pub spawn_y: f64,
+    pub base_level: u32,
+    pub hp_mult: f64,
+    pub atk_mult: f64,
+    pub def_mult: f64,
+    pub modifiers: &'static [EnemyModifier],
+    pub phase_thresholds: &'static [f64], // HP % thresholds for phase changes
+    pub summon_count: u32,                // minions to summon per phase
+}
+
+pub static WORLD_BOSSES: &[WorldBossDef] = &[
+    WorldBossDef {
+        id: "infernal_drake", name: "Ignaroth", title: "the Infernal Drake",
+        spawn_x: 80.0, spawn_y: 80.0, base_level: 15,
+        hp_mult: 12.0, atk_mult: 4.0, def_mult: 3.0,
+        modifiers: &[EnemyModifier::Burning, EnemyModifier::Enraged, EnemyModifier::Regenerator],
+        phase_thresholds: &[0.75, 0.50, 0.25],
+        summon_count: 3,
+    },
+    WorldBossDef {
+        id: "frost_lich", name: "Cryomortis", title: "the Frost Lich",
+        spawn_x: -90.0, spawn_y: 70.0, base_level: 20,
+        hp_mult: 10.0, atk_mult: 5.0, def_mult: 2.5,
+        modifiers: &[EnemyModifier::Freezing, EnemyModifier::Shielded, EnemyModifier::Teleporter],
+        phase_thresholds: &[0.66, 0.33],
+        summon_count: 4,
+    },
+    WorldBossDef {
+        id: "shadow_king", name: "Umbrathor", title: "the Shadow King",
+        spawn_x: -70.0, spawn_y: -85.0, base_level: 25,
+        hp_mult: 15.0, atk_mult: 6.0, def_mult: 4.0,
+        modifiers: &[EnemyModifier::Vampiric, EnemyModifier::Berserker, EnemyModifier::Undying, EnemyModifier::Swift],
+        phase_thresholds: &[0.80, 0.60, 0.40, 0.20],
+        summon_count: 5,
+    },
+    WorldBossDef {
+        id: "stone_titan", name: "Terragor", title: "the Stone Titan",
+        spawn_x: 95.0, spawn_y: -75.0, base_level: 18,
+        hp_mult: 20.0, atk_mult: 3.5, def_mult: 6.0,
+        modifiers: &[EnemyModifier::Armored, EnemyModifier::Thorns, EnemyModifier::Reflector],
+        phase_thresholds: &[0.50],
+        summon_count: 2,
+    },
+    WorldBossDef {
+        id: "void_serpent", name: "Nihilax", title: "the Void Serpent",
+        spawn_x: 0.0, spawn_y: -120.0, base_level: 30,
+        hp_mult: 18.0, atk_mult: 7.0, def_mult: 5.0,
+        modifiers: &[EnemyModifier::Poisonous, EnemyModifier::Draining, EnemyModifier::Explosive, EnemyModifier::Swift],
+        phase_thresholds: &[0.75, 0.50, 0.25],
+        summon_count: 6,
+    },
+];
