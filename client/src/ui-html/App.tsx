@@ -39,6 +39,7 @@ import { LeaderboardPanel } from './panels/LeaderboardPanel';
 import { TradePanel } from './panels/TradePanel';
 import { SkillTreePanel } from './panels/SkillTreePanel';
 import { GuildPanel } from './panels/GuildPanel';
+import { EnchantPanel } from './panels/EnchantPanel';
 import { StatAllocationModal } from './modals/StatAllocationModal';
 
 /**
@@ -105,6 +106,7 @@ export function App() {
       {panels.value.has('leaderboard') && <LeaderboardPanel onClose={() => togglePanel('leaderboard')} />}
       <SkillTreePanel />
       <GuildPanel />
+      <EnchantPanel />
       <InspectPanel />
       <TradePanel />
 
