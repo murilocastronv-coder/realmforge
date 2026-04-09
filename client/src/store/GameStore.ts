@@ -43,14 +43,14 @@ const DEFAULT_STATS: PlayerStats = {
 // ─── Chat ────────────────────────────────────────────────────
 export interface ChatMessage {
   id: string;
-  channel: 'global' | 'local' | 'trade' | 'system' | 'combat' | 'whisper';
+  channel: 'global' | 'local' | 'trade' | 'system' | 'combat' | 'whisper' | 'guild';
   sender: string;
   text: string;
   timestamp: number;
 }
 
 // ─── Panel State ─────────────────────────────────────────────
-export type PanelId = 'inventory' | 'equipment' | 'bank' | 'crafting' | 'marketplace' | 'stats' | 'settings' | 'character' | 'achievements' | 'combatlog' | 'social' | 'worldmap' | 'leaderboard' | 'skilltree';
+export type PanelId = 'inventory' | 'equipment' | 'bank' | 'crafting' | 'marketplace' | 'stats' | 'settings' | 'character' | 'achievements' | 'combatlog' | 'social' | 'worldmap' | 'leaderboard' | 'skilltree' | 'guild' | 'enchant' | 'fishing' | 'factions';
 
 // ─── Signals (reactive state) ────────────────────────────────
 export const playerStats = signal<PlayerStats>({ ...DEFAULT_STATS });
@@ -83,6 +83,31 @@ export const playerCoords = signal<{ x: number; y: number }>({ x: 0, y: 0 });
 
 // Selected combat target — set by GameScene when clicking an enemy
 export const selectedTargetId = signal<string | null>(null);
+
+// ─── Guild ───────────────────────────────────────────────────
+export interface GuildMember {
+  id: string;
+  name: string;
+  level: number;
+  class: string;
+  rank: 'leader' | 'officer' | 'member';
+  online: boolean;
+}
+
+export interface GuildInfo {
+  id: string;
+  name: string;
+  tag: string;
+  leaderId: string;
+  level: number;
+  xp: number;
+  motd: string;
+  bankGold: number;
+  members: GuildMember[];
+}
+
+export const guildData = signal<GuildInfo | null>(null);
+export const guildInvite = signal<{ guildName: string; fromPlayer: string } | null>(null);
 
 // Entity tooltip (hovered entity info from Phaser)
 export interface EntityTooltipData {
@@ -315,6 +340,39 @@ export const tradeState = signal<TradeState>({
 
 export const tradeRequest = signal<{ from: string } | null>(null);
 
+// Guild alias (guildData defined above by guild system)
+export const guildInfo = guildData;
+
+// ─── Fishing ────────────────────────────────────────────────
+export interface FishingResult {
+  success: boolean;
+  catch: string;
+  icon: string;
+  rarity: string;
+  value: number;
+}
+export const lastFishingResult = signal<FishingResult | null>(null);
+export const isFishing = signal<boolean>(false);
+
+// ─── Factions ───────────────────────────────────────────────
+export interface FactionInfo {
+  id: string;
+  name: string;
+  icon: string;
+  description: string;
+  rep: number;
+  rank: string;
+}
+export const factions = signal<FactionInfo[]>([]);
+
+// ─── Set Bonuses ────────────────────────────────────────────
+export interface SetBonus {
+  name: string;
+  icon: string;
+  bonuses: { pieces: number; stat: string; value: number }[];
+}
+export const activeSets = signal<SetBonus[]>([]);
+
 export function useSkill(slotIndex: number): void {
   const slots = hotbar.value;
   if (slotIndex < 0 || slotIndex >= slots.length) return;
@@ -475,6 +533,9 @@ export const commands = {
   tradeCancel(): void {
     getNetwork().send(MessageType.TradeAction, { action: 'cancel' });
     tradeState.value = { active: false, itemsA: [], itemsB: [], goldA: 0, goldB: 0, confirmedA: false, confirmedB: false };
+  },
+  enchantItem(slotIndex: number, itemId: string): void {
+    getNetwork().send(MessageType.EnchantItem, { slotIndex, itemId });
   },
 };
 

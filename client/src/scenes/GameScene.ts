@@ -262,10 +262,12 @@ export class GameScene extends Phaser.Scene {
     this.registerKeyboardShortcut('keydown-O', () => togglePanel('settings'));
     this.registerKeyboardShortcut('keydown-Y', () => togglePanel('achievements'));
     this.registerKeyboardShortcut('keydown-L', () => togglePanel('combatlog'));
-    this.registerKeyboardShortcut('keydown-G', () => togglePanel('social'));
+    this.registerKeyboardShortcut('keydown-G', () => togglePanel('guild'));
+    this.registerKeyboardShortcut('keydown-H', () => togglePanel('social'));
     this.registerKeyboardShortcut('keydown-TAB', () => togglePanel('worldmap'));
     this.registerKeyboardShortcut('keydown-K', () => togglePanel('skilltree'));
     this.registerKeyboardShortcut('keydown-J', () => togglePanel('leaderboard'));
+    this.registerKeyboardShortcut('keydown-U', () => togglePanel('enchant'));
     this.registerKeyboardShortcut('keydown-ESC', () => {
       closeAllPanels();
       showStatAllocation.value = false;

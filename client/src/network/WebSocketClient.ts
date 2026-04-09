@@ -24,6 +24,10 @@ export enum MessageType {
   NpcInteract = 23,
   SkillTreeUnlock = 24,
   SkillTreeRequest = 25,
+  GuildAction = 26,
+  EnchantItem = 27,
+  FishingAction = 28,
+  FactionAction = 29,
 
   // Server → Client
   AuthResult = 50,
@@ -57,6 +61,11 @@ export enum MessageType {
   WorldBossDeath = 84,
   NpcDialogue = 85,
   SkillTreeData = 86,
+  GuildData = 87,
+  GuildChat = 88,
+  EnchantResult = 89,
+  FishingResult = 90,
+  FactionData = 91,
 }
 
 export interface GameMessage {

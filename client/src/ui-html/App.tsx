@@ -38,6 +38,7 @@ import { WorldMapPanel } from './panels/WorldMapPanel';
 import { LeaderboardPanel } from './panels/LeaderboardPanel';
 import { TradePanel } from './panels/TradePanel';
 import { SkillTreePanel } from './panels/SkillTreePanel';
+import { GuildPanel } from './panels/GuildPanel';
 import { StatAllocationModal } from './modals/StatAllocationModal';
 
 /**
@@ -103,6 +104,7 @@ export function App() {
       {panels.value.has('worldmap') && <WorldMapPanel onClose={() => togglePanel('worldmap')} />}
       {panels.value.has('leaderboard') && <LeaderboardPanel onClose={() => togglePanel('leaderboard')} />}
       <SkillTreePanel />
+      <GuildPanel />
       <InspectPanel />
       <TradePanel />
 

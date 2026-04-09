@@ -30,6 +30,10 @@ pub const MSG_QUEST_LIST_REQUEST: u8 = 22; // Client → Server: request quest l
 pub const MSG_NPC_INTERACT: u8 = 23;   // Client → Server: interact with NPC
 pub const MSG_SKILL_TREE_UNLOCK: u8 = 24;  // Client → Server: unlock a skill tree node
 pub const MSG_SKILL_TREE_REQUEST: u8 = 25;  // Client → Server: request skill tree data
+pub const MSG_GUILD_ACTION: u8 = 26;        // Client → Server: guild actions (create, invite, etc.)
+pub const MSG_ENCHANT_ITEM: u8 = 27;        // Client → Server: enchant an item
+pub const MSG_FISHING_ACTION: u8 = 28;      // Client → Server: start/reel fishing
+pub const MSG_FACTION_ACTION: u8 = 29;      // Client → Server: faction join/leave/info
 
 // Server → Client
 pub const MSG_AUTH_RESULT: u8 = 50;
@@ -63,6 +67,11 @@ pub const MSG_WORLD_BOSS_SPAWN: u8 = 83;   // Server → Client: world boss spaw
 pub const MSG_WORLD_BOSS_DEATH: u8 = 84;   // Server → Client: world boss defeated
 pub const MSG_NPC_DIALOGUE: u8 = 85;       // Server → Client: NPC dialogue data
 pub const MSG_SKILL_TREE_DATA: u8 = 86;    // Server → Client: skill tree state
+pub const MSG_GUILD_DATA: u8 = 87;         // Server → Client: guild info update
+pub const MSG_GUILD_CHAT: u8 = 88;         // Server → Client: guild chat message
+pub const MSG_ENCHANT_RESULT: u8 = 89;      // Server → Client: enchant result
+pub const MSG_FISHING_RESULT: u8 = 90;      // Server → Client: fishing catch result
+pub const MSG_FACTION_DATA: u8 = 91;        // Server → Client: faction rep/info
 
 // ─── Message Envelope ────────────────────────────────────────
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -204,6 +213,22 @@ pub struct StatsTracker {
     pub highest_hit: i32,
 }
 
+// ─── Guild Data ──────────────────────────────────────────────
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GuildData {
+    pub id: Uuid,
+    pub name: String,
+    pub tag: String, // 2-4 char tag like [RF]
+    pub leader_id: Uuid,
+    pub officers: Vec<Uuid>,
+    pub members: Vec<Uuid>, // all members including leader and officers
+    pub created_at: u64,
+    pub level: u32,
+    pub xp: u64,
+    pub motd: String,
+    pub bank_gold: u64,
+}
+
 // ─── Player Data ─────────────────────────────────────────────
 #[derive(Debug, Clone)]
 pub struct PlayerData {
@@ -241,6 +266,20 @@ pub struct PlayerData {
     pub stats_tracker: StatsTracker, // lifetime stats for achievements/quests
     pub skill_tree_unlocked: Vec<String>,  // unlocked skill tree node IDs
     pub skill_points: u32,                 // available skill tree points (1 per level)
+    // Guild
+    pub guild_id: Option<Uuid>,
+    pub guild_name: Option<String>,
+    pub guild_rank: String,  // "leader", "officer", "member", ""
+    // Factions/Reputation
+    pub faction_rep: HashMap<String, i32>, // faction_id -> reputation points
+    // Titles
+    pub active_title: String,
+    pub unlocked_titles: Vec<String>,
+    // Fishing stats
+    pub fish_caught: u32,
+    // Daily login
+    pub last_login_day: u32,  // day counter for daily rewards
+    pub login_streak: u32,
 }
 
 impl PlayerData {
@@ -295,6 +334,15 @@ impl PlayerData {
             stats_tracker: StatsTracker::default(),
             skill_tree_unlocked: Vec::new(),
             skill_points: 0,
+            guild_id: None,
+            guild_name: None,
+            guild_rank: String::new(),
+            faction_rep: HashMap::new(),
+            active_title: String::new(),
+            unlocked_titles: Vec::new(),
+            fish_caught: 0,
+            last_login_day: 0,
+            login_streak: 0,
         }
     }
 
@@ -324,22 +372,76 @@ impl PlayerData {
 
     /// Total ATK including equipment bonuses
     pub fn total_atk(&self) -> i32 {
-        self.atk + self.equipment.values()
+        let equip_bonus: i32 = self.equipment.values()
             .filter_map(|item| item.stats.get("ATK"))
-            .sum::<i32>()
+            .sum();
+        let set_bonus: i32 = calculate_set_bonuses(&self.equipment).iter()
+            .flat_map(|(_, _, bonuses)| bonuses.iter())
+            .filter(|(_, stat, _)| *stat == "ATK")
+            .map(|(_, _, val)| val)
+            .sum();
+        self.atk + equip_bonus + set_bonus
     }
 
     /// Total DEF including equipment bonuses
     pub fn total_def(&self) -> i32 {
-        self.def + self.equipment.values()
+        let equip_bonus: i32 = self.equipment.values()
             .filter_map(|item| item.stats.get("DEF"))
-            .sum::<i32>()
+            .sum();
+        let set_bonus: i32 = calculate_set_bonuses(&self.equipment).iter()
+            .flat_map(|(_, _, bonuses)| bonuses.iter())
+            .filter(|(_, stat, _)| *stat == "DEF")
+            .map(|(_, _, val)| val)
+            .sum();
+        self.def + equip_bonus + set_bonus
     }
 
     pub fn total_lck(&self) -> i32 {
-        self.lck + self.equipment.values()
+        let equip_bonus: i32 = self.equipment.values()
             .filter_map(|item| item.stats.get("LCK"))
-            .sum::<i32>()
+            .sum();
+        let set_bonus: i32 = calculate_set_bonuses(&self.equipment).iter()
+            .flat_map(|(_, _, bonuses)| bonuses.iter())
+            .filter(|(_, stat, _)| *stat == "LCK")
+            .map(|(_, _, val)| val)
+            .sum();
+        self.lck + equip_bonus + set_bonus
+    }
+
+    pub fn total_hp_bonus(&self) -> i32 {
+        let equip_bonus: i32 = self.equipment.values()
+            .filter_map(|item| item.stats.get("HP"))
+            .sum();
+        let set_bonus: i32 = calculate_set_bonuses(&self.equipment).iter()
+            .flat_map(|(_, _, bonuses)| bonuses.iter())
+            .filter(|(_, stat, _)| *stat == "HP")
+            .map(|(_, _, val)| val)
+            .sum();
+        equip_bonus + set_bonus
+    }
+
+    pub fn total_mp_bonus(&self) -> i32 {
+        let equip_bonus: i32 = self.equipment.values()
+            .filter_map(|item| item.stats.get("MP"))
+            .sum();
+        let set_bonus: i32 = calculate_set_bonuses(&self.equipment).iter()
+            .flat_map(|(_, _, bonuses)| bonuses.iter())
+            .filter(|(_, stat, _)| *stat == "MP")
+            .map(|(_, _, val)| val)
+            .sum();
+        equip_bonus + set_bonus
+    }
+
+    pub fn total_spd_bonus(&self) -> i32 {
+        let equip_bonus: i32 = self.equipment.values()
+            .filter_map(|item| item.stats.get("SPD"))
+            .sum();
+        let set_bonus: i32 = calculate_set_bonuses(&self.equipment).iter()
+            .flat_map(|(_, _, bonuses)| bonuses.iter())
+            .filter(|(_, stat, _)| *stat == "SPD")
+            .map(|(_, _, val)| val)
+            .sum();
+        equip_bonus + set_bonus
     }
 
     /// Try to add item to first free inventory slot. Returns false if full.
@@ -639,6 +741,8 @@ pub struct Item {
     pub stats: HashMap<String, i32>,
     pub description: String,
     pub affixes: Vec<String>,
+    #[serde(default)]
+    pub enchant_level: u8,    // 0-10, enchantment upgrade level
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -667,6 +771,7 @@ impl Item {
             stats,
             description: format!("A level {} weapon", level),
             affixes: vec![],
+            enchant_level: 0,
         }
     }
 
@@ -686,6 +791,7 @@ impl Item {
             stats,
             description: format!("A level {} armor piece", level),
             affixes: vec![],
+            enchant_level: 0,
         }
     }
 
@@ -703,6 +809,7 @@ impl Item {
             stats: HashMap::new(),
             description: "Consumable item".into(),
             affixes: vec![],
+            enchant_level: 0,
         }
     }
 
@@ -720,6 +827,7 @@ impl Item {
             stats: HashMap::new(),
             description: "Crafting material".into(),
             affixes: vec![],
+            enchant_level: 0,
         }
     }
 
@@ -737,6 +845,7 @@ impl Item {
             "stats": self.stats,
             "description": self.description,
             "affixes": self.affixes,
+            "enchantLevel": self.enchant_level,
         })
     }
 
@@ -975,6 +1084,11 @@ pub fn generate_loot(zone_level: u32, enemy_level: u32, luck_bonus: i32) -> Vec<
     // Always drop gold
     let gold_amount = (10 + zone_level * 5 + enemy_level * 3) as u64;
     // Gold is not an item, handled separately
+
+    // 5% chance to drop Enchanting Stone
+    if rng.gen_bool(0.05) {
+        loot.push(Item::new_material("Enchanting Stone", 1, 1));
+    }
 
     loot
 }
@@ -1471,4 +1585,262 @@ pub static SKILL_TREES: &[SkillTreeNode] = &[
     SkillTreeNode { id: "ro_subt_3", name: "Nimble Fingers", description: "+3 SPD from dexterity", icon: "🤏", class: "rogue", tree: "Subtlety", tier: 3, requires: &["ro_subt_2"], bonus_type: "spd", bonus_value: 3, skill_point_cost: 3 },
     SkillTreeNode { id: "ro_subt_4", name: "Treasure Hunter", description: "+15% XP from exploration", icon: "🗺️", class: "rogue", tree: "Subtlety", tier: 4, requires: &["ro_subt_3"], bonus_type: "xp_mult", bonus_value: 15, skill_point_cost: 4 },
     SkillTreeNode { id: "ro_subt_5", name: "Master Thief", description: "+15 LCK and +25% gold", icon: "👑", class: "rogue", tree: "Subtlety", tier: 5, requires: &["ro_subt_4"], bonus_type: "lck", bonus_value: 15, skill_point_cost: 5 },
+];
+
+// ─── Item Set Bonuses ────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct ItemSetDef {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub icon: &'static str,
+    pub pieces: &'static [&'static str],  // item name keywords to match
+    pub bonuses: &'static [(u32, &'static str, i32)], // (pieces_needed, stat, bonus)
+}
+
+pub static ITEM_SETS: &[ItemSetDef] = &[
+    // --- Tier 1: Leather Set (Lv 1-5) ---
+    ItemSetDef {
+        id: "leather_set", name: "Leather Ranger", icon: "🦌",
+        pieces: &["Leather Cap", "Leather Armor", "Leather Pants", "Leather Boots"],
+        bonuses: &[(2, "DEF", 5), (3, "SPD", 3), (4, "HP", 30)],
+    },
+    // --- Tier 2: Iron Set (Lv 5-10) ---
+    ItemSetDef {
+        id: "iron_set", name: "Iron Guardian", icon: "🛡️",
+        pieces: &["Iron Helm", "Chain Mail", "Iron Greaves", "Iron Boots", "Iron Shield"],
+        bonuses: &[(2, "DEF", 8), (3, "HP", 40), (4, "DEF", 12), (5, "HP", 80)],
+    },
+    // --- Tier 3: Steel Set (Lv 10-15) ---
+    ItemSetDef {
+        id: "steel_set", name: "Steel Warden", icon: "⚔️",
+        pieces: &["Steel Helm", "Plate Armor", "Mithril Greaves", "Winged Boots", "Tower Shield"],
+        bonuses: &[(2, "DEF", 12), (3, "ATK", 8), (4, "HP", 60), (5, "DEF", 20)],
+    },
+    // --- Tier 4: Mithril Set (Lv 15-20) ---
+    ItemSetDef {
+        id: "mithril_set", name: "Mithril Champion", icon: "💠",
+        pieces: &["Mithril Crown", "Mithril Armor", "Mithril Greaves", "Winged Boots"],
+        bonuses: &[(2, "DEF", 15), (3, "ATK", 12), (4, "HP", 100)],
+    },
+    // --- Tier 5: Dragon Set (Lv 20+) ---
+    ItemSetDef {
+        id: "dragon_set", name: "Dragonslayer", icon: "🐉",
+        pieces: &["Dragon Helm", "Dragon Plate", "Adamantite Greaves", "Adamantite Sabatons", "Adamantite Bulwark"],
+        bonuses: &[(2, "ATK", 15), (3, "DEF", 18), (4, "HP", 120), (5, "ATK", 30)],
+    },
+    // --- Tier 6: Shadow Set (Rogue-focused) ---
+    ItemSetDef {
+        id: "shadow_set", name: "Shadow Assassin", icon: "🌑",
+        pieces: &["Shadow Vestments", "Shadow Leggings", "Shadow Treads", "Shadow Cloak"],
+        bonuses: &[(2, "SPD", 8), (3, "ATK", 15), (4, "LCK", 20)],
+    },
+    // --- Tier 6: Celestial Set (Mage-focused) ---
+    ItemSetDef {
+        id: "celestial_set", name: "Celestial Sage", icon: "✨",
+        pieces: &["Celestial Circlet", "Celestial Robe", "Celestial Cuisses", "Celestial Sandals", "Celestial Ward"],
+        bonuses: &[(2, "MP", 40), (3, "ATK", 12), (4, "HP", 80), (5, "MP", 80)],
+    },
+    // --- Tier 6: Void Set (End-game) ---
+    ItemSetDef {
+        id: "void_set", name: "Void Conqueror", icon: "🕳️",
+        pieces: &["Void Mask", "Void Cuirass", "Void Tassets", "Void Boots", "Void Aegis"],
+        bonuses: &[(2, "ATK", 20), (3, "DEF", 20), (4, "HP", 150), (5, "ATK", 40)],
+    },
+];
+
+/// Check how many pieces of each set a player has equipped, return active set bonuses
+pub fn calculate_set_bonuses(equipment: &std::collections::HashMap<String, Item>) -> Vec<(&'static str, &'static str, Vec<(u32, &'static str, i32)>)> {
+    let mut result = Vec::new();
+    let equipped_names: Vec<&str> = equipment.values().map(|item| item.name.as_str()).collect();
+
+    for set in ITEM_SETS {
+        let mut matched = 0u32;
+        for &piece_keyword in set.pieces {
+            if equipped_names.iter().any(|name| name.contains(piece_keyword)) {
+                matched += 1;
+            }
+        }
+        if matched >= 2 {
+            let active: Vec<(u32, &str, i32)> = set.bonuses.iter()
+                .filter(|(needed, _, _)| matched >= *needed)
+                .cloned()
+                .collect();
+            if !active.is_empty() {
+                result.push((set.name, set.icon, active));
+            }
+        }
+    }
+    result
+}
+
+// ─── Consumable Definitions ──────────────────────────────────
+
+pub const CONSUMABLE_TYPES: &[(&str, &str, &str, &str, i32)] = &[
+    // (name, icon, effect_type, stat, value)
+    // Potions
+    ("Health Potion",      "❤️",  "instant_heal", "HP", 50),
+    ("Greater Health Potion", "💖", "instant_heal", "HP", 150),
+    ("Supreme Health Potion", "💗", "instant_heal", "HP", 400),
+    ("Mana Potion",        "💙",  "instant_mana", "MP", 40),
+    ("Greater Mana Potion", "🔵", "instant_mana", "MP", 120),
+    ("Elixir of Life",     "🧪",  "instant_heal", "HP", 999),
+    // Buff Potions (temporary stat boost)
+    ("Strength Elixir",    "💪",  "buff_atk",  "ATK", 15),
+    ("Iron Skin Elixir",   "🛡️", "buff_def",  "DEF", 15),
+    ("Swiftness Elixir",   "⚡",  "buff_spd",  "SPD", 10),
+    ("Fortune Elixir",     "🍀",  "buff_lck",  "LCK", 20),
+    // Scrolls
+    ("Scroll of Teleport",  "📜", "teleport",   "",    0),
+    ("Scroll of Identify",  "🔍", "identify",   "",    0),
+    ("Scroll of Enchant",   "✨",  "enchant_boost", "", 0),
+    // Food (regen over time)
+    ("Bread",              "🍞",  "regen_hp",  "HP",  5),
+    ("Cooked Meat",        "🍖",  "regen_hp",  "HP",  10),
+    ("Feast Plate",        "🍽️", "regen_both", "HP",  15),
+    ("Golden Apple",       "🍎",  "regen_both", "HP",  25),
+];
+
+// ─── Fishing Loot Table ───────────────────────────────────────
+// (name, icon, rarity, min_level_zone, weight, sell_value, special_stat)
+pub const FISHING_LOOT: &[(&str, &str, u8, u32, u32, u64, &str)] = &[
+    // Common catches
+    ("Small Bass",          "🐟", 0, 1,  30, 5,   ""),
+    ("Perch",               "🐟", 0, 1,  25, 8,   ""),
+    ("Trout",               "🐟", 0, 1,  20, 12,  ""),
+    ("Catfish",             "🐟", 0, 5,  18, 15,  ""),
+    ("Pike",                "🐟", 0, 5,  15, 20,  ""),
+    ("Salmon",              "🐟", 0, 10, 15, 25,  ""),
+    // Uncommon catches
+    ("Rainbow Trout",       "🐠", 1, 5,  12, 35,  ""),
+    ("Golden Carp",         "🐠", 1, 10, 10, 50,  ""),
+    ("Electric Eel",        "🐠", 1, 15, 8,  65,  ""),
+    ("Swordfish",           "🐠", 1, 20, 6,  80,  ""),
+    // Rare catches
+    ("Moonlit Koi",         "🐡", 2, 15, 4,  150, ""),
+    ("Phantom Anglerfish",  "🐡", 2, 20, 3,  200, ""),
+    ("Lava Eel",            "🐡", 2, 25, 2,  300, ""),
+    // Epic catches (special items)
+    ("Ancient Coelacanth",  "🎏", 3, 30, 1,  500, "ATK"),
+    ("Void Kraken Tentacle","🎏", 3, 35, 1,  750, "DEF"),
+    ("Crystal Starfish",    "🎏", 3, 25, 1,  600, "LCK"),
+    // Junk (also catch junk items sometimes)
+    ("Old Boot",            "👢", 0, 1,  8,  1,   ""),
+    ("Seaweed",             "🌿", 0, 1,  10, 2,   ""),
+    ("Driftwood",           "🪵", 0, 1,  8,  3,   ""),
+    // Materials from fishing
+    ("Pearl",               "🫧", 1, 10, 5,  40,  ""),
+    ("Fish Bone",           "🦴", 0, 5,  8,  10,  ""),
+    ("Enchanted Scale",     "✨", 2, 20, 2,  120, ""),
+];
+
+/// Pick a random fishing catch based on zone level and luck
+pub fn roll_fishing_catch(zone_level: u32, luck: i32) -> (&'static str, &'static str, u8, u64, &'static str) {
+    let mut rng = rand::thread_rng();
+    // Filter to eligible items and build weighted pool
+    let eligible: Vec<_> = FISHING_LOOT.iter()
+        .filter(|(_, _, _, min_lv, _, _, _)| zone_level >= *min_lv)
+        .collect();
+    if eligible.is_empty() {
+        return ("Small Bass", "🐟", 0, 5, "");
+    }
+    // Luck increases weight of rarer items
+    let luck_bonus = (luck as f64 * 0.01).max(0.0);
+    let total_weight: f64 = eligible.iter().map(|(_, _, rarity, _, weight, _, _)| {
+        let rarity_mult = match rarity {
+            0 => 1.0,
+            1 => 1.0 + luck_bonus,
+            2 => 1.0 + luck_bonus * 2.0,
+            3 => 1.0 + luck_bonus * 3.0,
+            _ => 1.0,
+        };
+        *weight as f64 * rarity_mult
+    }).sum();
+
+    let mut roll = rng.gen_range(0.0..total_weight);
+    for (name, icon, rarity, _, weight, value, special) in eligible.iter() {
+        let rarity_mult = match rarity {
+            0 => 1.0,
+            1 => 1.0 + luck_bonus,
+            2 => 1.0 + luck_bonus * 2.0,
+            3 => 1.0 + luck_bonus * 3.0,
+            _ => 1.0,
+        };
+        roll -= *weight as f64 * rarity_mult;
+        if roll <= 0.0 {
+            return (name, icon, *rarity, *value, special);
+        }
+    }
+    let last = eligible.last().unwrap();
+    (last.0, last.1, last.2, last.5, last.6)
+}
+
+// ─── Faction / Reputation System ──────────────────────────────
+// (faction_id, name, icon, description)
+pub const FACTIONS: &[(&str, &str, &str, &str)] = &[
+    ("starfall_guard",    "Starfall Guard",     "🛡️", "Protectors of Starfall Haven. Earn rep by slaying monsters near towns."),
+    ("shadow_syndicate",  "Shadow Syndicate",   "🗡️", "The underground rogues network. Earn rep by PvP and dungeon runs."),
+    ("arcane_circle",     "Arcane Circle",      "🔮", "Scholarly mages seeking knowledge. Earn rep by crafting and enchanting."),
+    ("merchant_league",   "Merchant League",    "💰", "Master traders of the realm. Earn rep by trading and selling."),
+    ("wild_hunters",      "Wild Hunters",       "🏹", "Rangers who roam the frontier. Earn rep by fishing and exploration."),
+    ("dragon_keepers",    "Dragon Keepers",     "🐉", "Ancient order bound to dragonkin. Earn rep by defeating bosses."),
+];
+
+// Reputation thresholds and titles
+pub const REP_RANKS: &[(i32, &str)] = &[
+    (-3000, "Hated"),
+    (-1000, "Hostile"),
+    (-100,  "Unfriendly"),
+    (0,     "Neutral"),
+    (500,   "Friendly"),
+    (3000,  "Honored"),
+    (9000,  "Revered"),
+    (21000, "Exalted"),
+];
+
+pub fn rep_rank_name(rep: i32) -> &'static str {
+    let mut rank = "Neutral";
+    for (threshold, name) in REP_RANKS.iter() {
+        if rep >= *threshold {
+            rank = name;
+        }
+    }
+    rank
+}
+
+// ─── Title System ─────────────────────────────────────────────
+// Titles earned through various achievements
+pub const TITLES: &[(&str, &str, &str)] = &[
+    // (title_id, display_name, requirement_description)
+    ("novice",       "Novice",          "Reach level 5"),
+    ("adventurer",   "Adventurer",      "Reach level 10"),
+    ("veteran",      "Veteran",         "Reach level 25"),
+    ("champion",     "Champion",        "Reach level 50"),
+    ("legend",       "Legend",           "Reach level 100"),
+    ("dragonslayer", "Dragonslayer",    "Defeat a world boss"),
+    ("artisan",      "Master Artisan",  "Craft 100 items"),
+    ("merchant",     "Merchant Prince", "Earn 100,000 gold total"),
+    ("angler",       "Master Angler",   "Catch 50 fish"),
+    ("explorer",     "Pathfinder",      "Visit all 9 towns"),
+    ("pvp_warrior",  "Gladiator",       "Win 50 PvP battles"),
+    ("guild_master", "Guild Master",    "Lead a guild with 10+ members"),
+    ("enchanter",    "Arcane Smith",    "Enchant an item to +10"),
+    ("collector",    "Collector",       "Own 50 unique items"),
+    ("speedrunner",  "Speed Demon",     "Reach level 20 in under 2 hours"),
+];
+
+// ─── Daily Login Rewards ──────────────────────────────────────
+// Day number → (item_name, quantity, gold_bonus)
+pub const DAILY_REWARDS: &[(u32, &str, u32, u64)] = &[
+    (1,  "Minor Health Potion", 5,  50),
+    (2,  "Minor Mana Potion",   5,  75),
+    (3,  "Iron Ore",            10, 100),
+    (4,  "Strength Elixir",     2,  150),
+    (5,  "Greater Health Potion", 3, 200),
+    (6,  "Enchanting Stone",    1,  250),
+    (7,  "Supreme Health Potion", 2, 500),  // Weekly bonus
+    (14, "Fortune Elixir",      3,  750),   // 2-week bonus
+    (21, "Scroll of Teleport",  5,  1000),  // 3-week bonus
+    (28, "Golden Apple",        3,  2000),  // Monthly bonus
+    (30, "Feast Plate",         5,  3000),  // Month-end mega bonus
 ];

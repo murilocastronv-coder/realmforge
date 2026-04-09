@@ -34,6 +34,11 @@ import {
   tradeRequest,
   activeQuests,
   npcDialogue,
+  guildInfo,
+  lastFishingResult,
+  isFishing,
+  factions,
+  activeSets,
   type Quest,
   type PlayerStats,
 } from '../../store/GameStore';
@@ -200,6 +205,11 @@ export function registerGameSceneNetworkHandlers(deps: GameSceneNetworkDeps): vo
 
     playerStats.value = { ...current, ...update };
     if (raw.gold !== undefined) gold.value = raw.gold as number;
+
+    // Update active set bonuses
+    if (raw.setBonuses !== undefined) {
+      activeSets.value = raw.setBonuses as any[];
+    }
 
     // Initialize hotbar when class is known
     if (raw.class !== undefined) initHotbarForClass(raw.class as string);
@@ -380,7 +390,7 @@ export function registerGameSceneNetworkHandlers(deps: GameSceneNetworkDeps): vo
   deps.register(MessageType.SkillResult, withErrorLogging('SkillResult', (msg) => {
     const p = msg.payload as { ok: boolean; error?: string; mana?: number };
     if (!p.ok) {
-      addCombatLog(`Skill failed: ${p.error ?? 'unknown'}`);
+      addCombatLog('system', `Skill failed: ${p.error ?? 'unknown'}`);
       // Restore mana if server rejected
       if (typeof p.mana === 'number') {
         playerStats.value = { ...playerStats.value, mp: p.mana };
@@ -515,8 +525,8 @@ export function registerGameSceneNetworkHandlers(deps: GameSceneNetworkDeps): vo
   // ─── Achievement unlock handler ────────────────────────────
   deps.register(MessageType.AchievementUnlock, withErrorLogging('AchievementUnlock', (msg) => {
     const p = msg.payload as { id: string; title: string; description: string; icon: string; category: string };
-    showToast(`🏆 Achievement Unlocked: ${p.icon} ${p.title}`, 'legendary');
-    playSFX('levelUp');
+    showToast(`🏆 Achievement Unlocked: ${p.icon} ${p.title}`, 'warning');
+    playSFX('achievement');
     // Update achievement panel state
     setAchievementProgress(p.id, 999); // Mark as complete
   }));
@@ -524,14 +534,14 @@ export function registerGameSceneNetworkHandlers(deps: GameSceneNetworkDeps): vo
   // ─── World boss handlers ───────────────────────────────────
   deps.register(MessageType.WorldBossSpawn, withErrorLogging('WorldBossSpawn', (msg) => {
     const p = msg.payload as { name: string; title: string; x: number; y: number; level: number };
-    showToast(`⚠️ WORLD BOSS: ${p.name} ${p.title} has appeared! (Lv.${p.level})`, 'legendary');
-    playSFX('levelUp');
+    showToast(`⚠️ WORLD BOSS: ${p.name} ${p.title} has appeared! (Lv.${p.level})`, 'warning');
+    playSFX('achievement');
     addChatMessage('global', 'System', `⚠️ World Boss "${p.name} ${p.title}" has spawned at (${Math.round(p.x)}, ${Math.round(p.y)})!`);
   }));
 
   deps.register(MessageType.WorldBossDeath, withErrorLogging('WorldBossDeath', (msg) => {
     const p = msg.payload as { name: string; killerName: string };
-    showToast(`👑 World Boss ${p.name} has been defeated!`, 'legendary');
+    showToast(`👑 World Boss ${p.name} has been defeated!`, 'warning');
     addChatMessage('global', 'System', `👑 World Boss "${p.name}" has been defeated by ${p.killerName}!`);
   }));
 
@@ -560,5 +570,50 @@ export function registerGameSceneNetworkHandlers(deps: GameSceneNetworkDeps): vo
     if (p.message) {
       addChatMessage('system', 'System', p.message);
     }
+  }));
+
+  // ─── Guild Data handler ────────────────────────────────────
+  deps.register(MessageType.GuildData, withErrorLogging('GuildData', (msg) => {
+    const p = msg.payload as { guild?: any };
+    guildInfo.value = p?.guild ?? null;
+  }));
+
+  // ─── Guild Chat handler ────────────────────────────────────
+  deps.register(MessageType.GuildChat, withErrorLogging('GuildChat', (msg) => {
+    const p = msg.payload as { sender: string; text: string };
+    addChatMessage('guild', p.sender, p.text);
+  }));
+
+  // ─── Enchant Result handler ───────────────────────────────
+  deps.register(MessageType.EnchantResult, withErrorLogging('EnchantResult', (msg) => {
+    const p = msg.payload as { success: boolean; itemName?: string; newLevel?: number; message?: string };
+    if (p.message) {
+      addChatMessage('system', 'System', p.message);
+    }
+    if (p.success) {
+      showToast(`✨ Enchant success! ${p.itemName} +${p.newLevel}`, 'success');
+      playSFX('achievement');
+    } else {
+      showToast(`💥 Enchant failed!`, 'danger');
+      playSFX('error');
+    }
+  }));
+
+  // ─── Fishing Result handler ───────────────────────────────
+  deps.register(MessageType.FishingResult, withErrorLogging('FishingResult', (msg) => {
+    const p = msg.payload as import('../../store/GameStore').FishingResult;
+    lastFishingResult.value = p;
+    isFishing.value = false;
+    if (p.success) {
+      const rarityColors: Record<string, string> = { Common: '⚪', Uncommon: '🟢', Rare: '🔵', Epic: '🟣' };
+      showToast(`${p.icon} Caught ${rarityColors[p.rarity] || ''} ${p.catch}! (${p.value}g)`, 'success');
+      playSFX('loot_pickup');
+    }
+  }));
+
+  // ─── Faction Data handler ─────────────────────────────────
+  deps.register(MessageType.FactionData, withErrorLogging('FactionData', (msg) => {
+    const p = msg.payload as { factions: import('../../store/GameStore').FactionInfo[] };
+    factions.value = p.factions ?? [];
   }));
 }

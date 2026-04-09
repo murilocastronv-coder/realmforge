@@ -97,6 +97,12 @@ struct AppState {
     player_trade: DashMap<Uuid, Uuid>,
     /// Pending trade requests: target_player_id -> (requester_id, time)
     trade_requests: DashMap<Uuid, (Uuid, std::time::Instant)>,
+    /// Guild data: guild_id -> GuildData
+    guilds: DashMap<Uuid, GuildData>,
+    /// Guild name uniqueness index: lowercase name -> guild_id
+    guild_names: DashMap<String, Uuid>,
+    /// Pending guild invites: invited_player_id -> (guild_id, inviter_name, time)
+    guild_invites: DashMap<Uuid, (Uuid, String, std::time::Instant)>,
 }
 
 impl AppState {
@@ -121,6 +127,9 @@ impl AppState {
             active_trades: DashMap::new(),
             player_trade: DashMap::new(),
             trade_requests: DashMap::new(),
+            guilds: DashMap::new(),
+            guild_names: DashMap::new(),
+            guild_invites: DashMap::new(),
         }
     }
 
@@ -478,6 +487,26 @@ async fn handle_message(
                 handle_skill_tree_request(state, pid);
             }
         }
+        MSG_GUILD_ACTION => {
+            if let Some(pid) = player_id {
+                handle_guild_action(state, pid, &msg.payload);
+            }
+        }
+        MSG_FISHING_ACTION => {
+            if let Some(pid) = player_id {
+                handle_fishing_action(state, pid, &msg.payload);
+            }
+        }
+        MSG_FACTION_ACTION => {
+            if let Some(pid) = player_id {
+                handle_faction_action(state, pid, &msg.payload);
+            }
+        }
+        MSG_ENCHANT_ITEM => {
+            if let Some(pid) = player_id {
+                handle_enchant_item(state, pid, &msg.payload);
+            }
+        }
         _ => {
             warn!("Unknown message type: {}", msg.msg_type);
         }
@@ -631,6 +660,14 @@ async fn handle_auth(
     send_inventory_update(state, &pid);
     send_bank_update(state, &pid);
     send_quest_update(state, pid);
+
+    // Send guild data if player is in a guild
+    {
+        let guild_id = state.players.get(&pid).and_then(|p| p.guild_id);
+        if let Some(gid) = guild_id {
+            send_guild_data_to_members(state, &gid);
+        }
+    }
 
     // Send nearby ground items
     let items: Vec<serde_json::Value> = state.ground_items.iter()
@@ -2361,6 +2398,68 @@ fn handle_use_item(state: &Arc<AppState>, player_id: Uuid, payload: &serde_json:
                 ("shop_silver_ore", "Silver Ore", 50, Item::new_material("Silver Ore", 1, 1)),
                 ("shop_gold_ore", "Gold Ore", 150, Item::new_material("Gold Ore", 2, 1)),
                 ("shop_dragon_scale", "Dragon Scale", 500, Item::new_material("Dragon Scale", 3, 1)),
+
+                // ── Consumables: Buff Elixirs ──
+                ("shop_str_elixir", "Strength Elixir", 120, {
+                    let mut p = Item::new_consumable("Strength Elixir", 1, 1);
+                    p.stats.insert("BUFF_ATK".into(), 15);
+                    p.stats.insert("BUFF_DURATION".into(), 600);
+                    p.description = "Boosts ATK by 15 for 30s.".into();
+                    p
+                }),
+                ("shop_def_elixir", "Iron Skin Elixir", 120, {
+                    let mut p = Item::new_consumable("Iron Skin Elixir", 1, 1);
+                    p.stats.insert("BUFF_DEF".into(), 15);
+                    p.stats.insert("BUFF_DURATION".into(), 600);
+                    p.description = "Boosts DEF by 15 for 30s.".into();
+                    p
+                }),
+                ("shop_spd_elixir", "Swiftness Elixir", 100, {
+                    let mut p = Item::new_consumable("Swiftness Elixir", 1, 1);
+                    p.stats.insert("BUFF_SPD".into(), 10);
+                    p.stats.insert("BUFF_DURATION".into(), 600);
+                    p.description = "Boosts SPD by 10 for 30s.".into();
+                    p
+                }),
+                ("shop_lck_elixir", "Fortune Elixir", 150, {
+                    let mut p = Item::new_consumable("Fortune Elixir", 1, 1);
+                    p.stats.insert("BUFF_LCK".into(), 20);
+                    p.stats.insert("BUFF_DURATION".into(), 600);
+                    p.description = "Boosts LCK by 20 for 30s.".into();
+                    p
+                }),
+                // ── Consumables: Food (HP/MP regen over time) ──
+                ("shop_bread", "Bread", 10, {
+                    let mut p = Item::new_consumable("Bread", 0, 5);
+                    p.stats.insert("REGEN_HP".into(), 5);
+                    p.stats.insert("REGEN_DURATION".into(), 200);
+                    p.description = "Restores 5 HP/tick for 10s.".into();
+                    p
+                }),
+                ("shop_cooked_meat", "Cooked Meat", 25, {
+                    let mut p = Item::new_consumable("Cooked Meat", 0, 5);
+                    p.stats.insert("REGEN_HP".into(), 10);
+                    p.stats.insert("REGEN_DURATION".into(), 200);
+                    p.description = "Restores 10 HP/tick for 10s.".into();
+                    p
+                }),
+                ("shop_feast", "Feast Plate", 100, {
+                    let mut p = Item::new_consumable("Feast Plate", 1, 3);
+                    p.stats.insert("REGEN_HP".into(), 15);
+                    p.stats.insert("REGEN_MP".into(), 10);
+                    p.stats.insert("REGEN_DURATION".into(), 400);
+                    p.description = "Restores HP and MP over 20s.".into();
+                    p
+                }),
+                // ── Consumables: Scrolls ──
+                ("shop_scroll_teleport", "Scroll of Teleport", 200, {
+                    let mut p = Item::new_consumable("Scroll of Teleport", 1, 1);
+                    p.stats.insert("TELEPORT".into(), 1);
+                    p.description = "Teleports to nearest town.".into();
+                    p
+                }),
+                // ── Materials: Enchanting ──
+                ("shop_enchant_stone", "Enchanting Stone", 300, Item::new_material("Enchanting Stone", 1, 1)),
             ];
 
             let found = shop_items.into_iter().find(|(id, _, _, _)| *id == listing_id);
@@ -2535,8 +2634,72 @@ fn handle_use_item(state: &Arc<AppState>, player_id: Uuid, payload: &serde_json:
                             ls_val, 400, 400, "potion", // 20 seconds
                         ));
                     }
+                    // Buff elixirs — apply Strength for ATK, Shield for DEF, Haste for SPD
+                    if let Some(&atk_buff) = item_stats.get("BUFF_ATK") {
+                        player.apply_effect(crate::protocol::ActiveEffect::new(
+                            crate::protocol::StatusEffectType::Strength,
+                            atk_buff, 600, 600, "elixir",
+                        ));
+                    }
+                    if let Some(&def_buff) = item_stats.get("BUFF_DEF") {
+                        player.apply_effect(crate::protocol::ActiveEffect::new(
+                            crate::protocol::StatusEffectType::Shield,
+                            def_buff, 600, 600, "elixir",
+                        ));
+                    }
+                    if let Some(&spd_buff) = item_stats.get("BUFF_SPD") {
+                        player.apply_effect(crate::protocol::ActiveEffect::new(
+                            crate::protocol::StatusEffectType::Haste,
+                            spd_buff, 600, 600, "elixir",
+                        ));
+                    }
+                    if let Some(&lck_buff) = item_stats.get("BUFF_LCK") {
+                        // Use Regen type with LCK tag as a luck boost
+                        player.apply_effect(crate::protocol::ActiveEffect::new(
+                            crate::protocol::StatusEffectType::Regen,
+                            lck_buff, 600, 600, "luck_elixir",
+                        ));
+                    }
+                    // Regen food (HP/MP regen over time)
+                    if let Some(&regen_hp) = item_stats.get("REGEN_HP") {
+                        let dur = item_stats.get("REGEN_DURATION").copied().unwrap_or(200) as u32;
+                        player.apply_effect(crate::protocol::ActiveEffect::new(
+                            crate::protocol::StatusEffectType::Regen,
+                            regen_hp, dur, 20, "food",
+                        ));
+                    }
+                    // Teleport scroll — save px/py for teleport after drop
+                    let do_teleport = item_stats.contains_key("TELEPORT");
+                    let player_id_copy = player.id;
 
                     drop(player);
+
+                    // Handle teleport outside the guard
+                    if do_teleport {
+                        // Find nearest town
+                        let px;
+                        let py;
+                        if let Some(p) = state.players.get(&player_id_copy) {
+                            px = p.x;
+                            py = p.y;
+                        } else { return; }
+                        drop(state.players.get(&player_id_copy));
+
+                        let (tx, ty) = crate::world::TOWNS.iter()
+                            .map(|(x, y, _, _)| {
+                                let dx = px - *x;
+                                let dy = py - *y;
+                                ((*x, *y), dx*dx + dy*dy)
+                            })
+                            .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+                            .map(|(pos, _)| pos)
+                            .unwrap_or((0.0, 0.0));
+
+                        if let Some(mut p) = state.players.get_mut(&player_id_copy) {
+                            p.x = tx;
+                            p.y = ty;
+                        }
+                    }
 
                     let mut used_text = format!("Used {}.", item_name);
                     if heal > 0 { used_text += &format!(" Healed {} HP.", heal); }
@@ -3038,6 +3201,7 @@ fn handle_craft(state: &Arc<AppState>, player_id: Uuid, recipe_id: &str) {
         stats,
         description: format!("Crafted {}", recipe.result_name),
         affixes: vec![],
+        enchant_level: 0,
     };
 
     if let Some(mut player) = state.players.get_mut(&player_id) {
@@ -3216,9 +3380,1062 @@ fn handle_skill_tree_request(state: &Arc<AppState>, player_id: Uuid) {
     state.send_to(&player_id, &msg);
 }
 
-// ─── Helper Functions ───────────────────────────────────────
+// ─── Enchanting System ──────────────────────────────────────
+
+/// Compute the flat enchant stat bonus for a given enchant level and item type.
+fn compute_enchant_bonus(enchant_level: u8, item_type: &ItemType) -> HashMap<String, i32> {
+    let mut bonus = HashMap::new();
+    if enchant_level == 0 {
+        return bonus;
+    }
+    let lvl = enchant_level as i32;
+    match item_type {
+        ItemType::Weapon => {
+            bonus.insert("ATK".into(), lvl * 3);
+        }
+        ItemType::Armor => {
+            bonus.insert("DEF".into(), lvl * 2);
+        }
+        _ => {}
+    }
+    // Milestone bonuses
+    if enchant_level >= 5 {
+        *bonus.entry("HP".into()).or_insert(0) += 5;
+    }
+    if enchant_level >= 10 {
+        *bonus.entry("HP".into()).or_insert(0) += 10;
+        *bonus.entry("SPD".into()).or_insert(0) += 3;
+    }
+    bonus
+}
+
+/// Derive the display name for an enchanted item.
+fn enchanted_item_name(base_name: &str, enchant_level: u8) -> String {
+    // Strip any existing "+N " prefix
+    let stripped = if base_name.starts_with('+') {
+        if let Some(idx) = base_name.find(' ') {
+            &base_name[idx + 1..]
+        } else {
+            base_name
+        }
+    } else {
+        base_name
+    };
+    if enchant_level > 0 {
+        format!("+{} {}", enchant_level, stripped)
+    } else {
+        stripped.to_string()
+    }
+}
+
+fn handle_enchant_item(state: &Arc<AppState>, player_id: Uuid, payload: &serde_json::Value) {
+    let slot_index = match payload.get("slotIndex").and_then(|v| v.as_u64()) {
+        Some(idx) => idx as usize,
+        None => return,
+    };
+    let item_id = match payload.get("itemId").and_then(|v| v.as_str()) {
+        Some(id) => id.to_string(),
+        None => return,
+    };
+
+    // Reject if player is in an active trade
+    if state.player_trade.contains_key(&player_id) {
+        let msg = json!({
+            "type": MSG_ENCHANT_RESULT,
+            "payload": {
+                "success": false,
+                "newLevel": 0,
+                "itemName": "",
+                "message": "Cannot enchant while trading!"
+            }
+        }).to_string();
+        state.send_to(&player_id, &msg);
+        return;
+    }
+
+    // Single mutable guard: validate, charge, mutate, then drop
+    let (success, new_level, result_name, result_msg) = {
+        let mut player = match state.players.get_mut(&player_id) {
+            Some(p) => p,
+            None => return,
+        };
+
+        // Validate slot and item identity
+        let item = match player.inventory.get(slot_index).and_then(|i| i.as_ref()) {
+            Some(i) => i,
+            None => {
+                drop(player);
+                let msg = json!({
+                    "type": MSG_ENCHANT_RESULT,
+                    "payload": {
+                        "success": false, "newLevel": 0, "itemName": "",
+                        "message": "No item in that slot!"
+                    }
+                }).to_string();
+                state.send_to(&player_id, &msg);
+                return;
+            }
+        };
+
+        if item.id != item_id {
+            drop(player);
+            let msg = json!({
+                "type": MSG_ENCHANT_RESULT,
+                "payload": {
+                    "success": false, "newLevel": 0, "itemName": "",
+                    "message": "Item has changed!"
+                }
+            }).to_string();
+            state.send_to(&player_id, &msg);
+            return;
+        }
+
+        // Only weapons and armor can be enchanted
+        if item.item_type != ItemType::Weapon && item.item_type != ItemType::Armor {
+            drop(player);
+            let msg = json!({
+                "type": MSG_ENCHANT_RESULT,
+                "payload": {
+                    "success": false, "newLevel": 0, "itemName": "",
+                    "message": "Only weapons and armor can be enchanted!"
+                }
+            }).to_string();
+            state.send_to(&player_id, &msg);
+            return;
+        }
+
+        let current_level = item.enchant_level;
+        if current_level >= 10 {
+            let name = item.name.clone();
+            drop(player);
+            let msg = json!({
+                "type": MSG_ENCHANT_RESULT,
+                "payload": {
+                    "success": false, "newLevel": current_level, "itemName": name,
+                    "message": "Item is already at maximum enchant level (+10)!"
+                }
+            }).to_string();
+            state.send_to(&player_id, &msg);
+            return;
+        }
+
+        let item_type = item.item_type.clone();
+
+        // Cost calculation
+        let gold_cost = 100u64 * (current_level as u64 + 1) * (current_level as u64 + 1);
+        let stones_needed = (current_level as u32) + 1;
+
+        // Check gold
+        if player.gold < gold_cost {
+            drop(player);
+            let msg = json!({
+                "type": MSG_ENCHANT_RESULT,
+                "payload": {
+                    "success": false, "newLevel": current_level, "itemName": "",
+                    "message": format!("Not enough gold! Need {} gold.", gold_cost)
+                }
+            }).to_string();
+            state.send_to(&player_id, &msg);
+            return;
+        }
+
+        // Count enchanting stones
+        let stone_count: u32 = player.inventory.iter()
+            .filter_map(|s| s.as_ref())
+            .filter(|i| i.template_id == "enchanting_stone")
+            .map(|i| i.quantity)
+            .sum();
+
+        if stone_count < stones_needed {
+            drop(player);
+            let msg = json!({
+                "type": MSG_ENCHANT_RESULT,
+                "payload": {
+                    "success": false, "newLevel": current_level, "itemName": "",
+                    "message": format!("Not enough Enchanting Stones! Need {} (have {}).", stones_needed, stone_count)
+                }
+            }).to_string();
+            state.send_to(&player_id, &msg);
+            return;
+        }
+
+        // --- All checks passed. Consume resources. ---
+        player.gold -= gold_cost;
+
+        // Consume enchanting stones
+        let mut stones_to_consume = stones_needed;
+        for slot in player.inventory.iter_mut() {
+            if stones_to_consume == 0 { break; }
+            if let Some(stack) = slot {
+                if stack.template_id == "enchanting_stone" {
+                    let take = stack.quantity.min(stones_to_consume);
+                    stack.quantity -= take;
+                    stones_to_consume -= take;
+                    if stack.quantity == 0 {
+                        *slot = None;
+                    }
+                }
+            }
+        }
+
+        // Roll for success
+        let success_rate: f64 = match current_level {
+            0..=2 => 1.0,
+            3..=5 => 0.85,
+            6..=7 => 0.70,
+            8 => 0.55,
+            9 => 0.40,
+            _ => 0.0,
+        };
+        let mut rng = rand::thread_rng();
+        let success = rng.gen_bool(success_rate.min(1.0));
+
+        // Compute old enchant bonus to remove
+        let old_bonus = compute_enchant_bonus(current_level, &item_type);
+
+        let new_level;
+        let result_msg;
+        if success {
+            new_level = current_level + 1;
+            result_msg = if new_level == 10 {
+                "✨ PERFECT ENCHANT! Your item radiates with legendary power! (+10)".to_string()
+            } else if new_level >= 7 {
+                format!("🔥 Enchantment successful! Your item surges with power! (+{})", new_level)
+            } else {
+                format!("✨ Enchantment successful! Your item glows with power! (+{})", new_level)
+            };
+        } else {
+            new_level = if current_level > 0 { current_level - 1 } else { 0 };
+            result_msg = if current_level > 0 {
+                format!("💥 Enchantment failed! Your item's power fades... (dropped to +{})", new_level)
+            } else {
+                "💥 Enchantment failed! The materials were consumed.".to_string()
+            };
+        }
+
+        // Compute new enchant bonus
+        let new_bonus = compute_enchant_bonus(new_level, &item_type);
+
+        // Apply stat changes to item
+        let item = player.inventory[slot_index].as_mut().unwrap();
+        // Remove old bonus
+        for (stat, val) in &old_bonus {
+            if let Some(s) = item.stats.get_mut(stat) {
+                *s -= val;
+                if *s <= 0 {
+                    item.stats.remove(stat);
+                }
+            }
+        }
+        // Add new bonus
+        for (stat, val) in &new_bonus {
+            *item.stats.entry(stat.clone()).or_insert(0) += val;
+        }
+        item.enchant_level = new_level;
+        item.name = enchanted_item_name(&item.name, new_level);
+        let result_name = item.name.clone();
+
+        (success, new_level, result_name, result_msg)
+    }; // player guard dropped
+
+    // Send enchant result
+    let result = json!({
+        "type": MSG_ENCHANT_RESULT,
+        "payload": {
+            "success": success,
+            "newLevel": new_level,
+            "itemName": result_name,
+            "message": result_msg,
+        }
+    }).to_string();
+    state.send_to(&player_id, &result);
+
+    // Send updated inventory
+    send_inventory_update(state, &player_id);
+}
+
+// ─── Guild System ────────────────────────────────────────────
+
+fn guild_sys_msg(state: &Arc<AppState>, pid: &Uuid, text: String) {
+    let m = json!({
+        "type": MSG_CHAT_MESSAGE,
+        "payload": { "sender": "System", "text": text, "channel": "system" }
+    }).to_string();
+    state.send_to(pid, &m);
+}
+
+fn send_guild_data_to_members(state: &Arc<AppState>, guild_id: &Uuid) {
+    let guild = match state.guilds.get(guild_id) {
+        Some(g) => g.clone(),
+        None => return,
+    };
+    // guard dropped ^
+
+    let member_info: Vec<serde_json::Value> = guild.members.iter().map(|mid| {
+        let (name, level, class, online) = if let Some(p) = state.players.get(mid) {
+            (p.username.clone(), p.level, p.class.clone(), true)
+        } else if let Some(p) = state.saved_players.iter().find(|e| e.value().id == *mid) {
+            (p.value().username.clone(), p.value().level, p.value().class.clone(), false)
+        } else {
+            ("Unknown".to_string(), 0, "unknown".to_string(), false)
+        };
+        let rank = if *mid == guild.leader_id {
+            "leader"
+        } else if guild.officers.contains(mid) {
+            "officer"
+        } else {
+            "member"
+        };
+        json!({
+            "id": mid.to_string(),
+            "name": name,
+            "level": level,
+            "class": class,
+            "rank": rank,
+            "online": online,
+        })
+    }).collect();
+
+    let msg = json!({
+        "type": MSG_GUILD_DATA,
+        "payload": {
+            "id": guild.id.to_string(),
+            "name": guild.name,
+            "tag": guild.tag,
+            "leaderId": guild.leader_id.to_string(),
+            "level": guild.level,
+            "xp": guild.xp,
+            "motd": guild.motd,
+            "bankGold": guild.bank_gold,
+            "members": member_info,
+        }
+    }).to_string();
+
+    for mid in &guild.members {
+        state.send_to(mid, &msg);
+    }
+}
+
+fn send_guild_cleared(state: &Arc<AppState>, player_id: &Uuid) {
+    let msg = json!({
+        "type": MSG_GUILD_DATA,
+        "payload": null
+    }).to_string();
+    state.send_to(player_id, &msg);
+}
+
+fn handle_guild_action(state: &Arc<AppState>, player_id: Uuid, payload: &serde_json::Value) {
+    let action = match payload.get("action").and_then(|v| v.as_str()) {
+        Some(a) => a,
+        None => return,
+    };
+
+    match action {
+        "create" => {
+            let name = match payload.get("name").and_then(|v| v.as_str()) {
+                Some(n) if n.len() >= 3 && n.len() <= 24 => n.to_string(),
+                _ => {
+                    guild_sys_msg(state, &player_id, "Guild name must be 3-24 characters.".into());
+                    return;
+                }
+            };
+            let tag = match payload.get("tag").and_then(|v| v.as_str()) {
+                Some(t) if t.len() >= 2 && t.len() <= 4 => t.to_uppercase(),
+                _ => {
+                    guild_sys_msg(state, &player_id, "Guild tag must be 2-4 characters.".into());
+                    return;
+                }
+            };
+
+            let (player_gold, player_guild_id) = {
+                match state.players.get(&player_id) {
+                    Some(p) => (p.gold, p.guild_id),
+                    None => return,
+                }
+            };
+
+            if player_guild_id.is_some() {
+                guild_sys_msg(state, &player_id, "You are already in a guild.".into());
+                return;
+            }
+            if player_gold < 500 {
+                guild_sys_msg(state, &player_id, "You need 500 gold to create a guild.".into());
+                return;
+            }
+
+            let name_lower = name.to_lowercase();
+            if state.guild_names.contains_key(&name_lower) {
+                guild_sys_msg(state, &player_id, "A guild with that name already exists.".into());
+                return;
+            }
+
+            let guild_id = Uuid::new_v4();
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+
+            let guild = GuildData {
+                id: guild_id,
+                name: name.clone(),
+                tag: tag.clone(),
+                leader_id: player_id,
+                officers: Vec::new(),
+                members: vec![player_id],
+                created_at: now,
+                level: 1,
+                xp: 0,
+                motd: String::new(),
+                bank_gold: 0,
+            };
+
+            state.guilds.insert(guild_id, guild);
+            state.guild_names.insert(name_lower, guild_id);
+
+            if let Some(mut p) = state.players.get_mut(&player_id) {
+                p.gold -= 500;
+                p.guild_id = Some(guild_id);
+                p.guild_name = Some(name.clone());
+                p.guild_rank = "leader".to_string();
+            }
+
+            guild_sys_msg(state, &player_id, format!("🏰 Guild [{}] {} created!", tag, name));
+            send_guild_data_to_members(state, &guild_id);
+            send_stats_update_by_id(state, &player_id);
+        }
+
+        "invite" => {
+            let target_name = match payload.get("target").and_then(|v| v.as_str()) {
+                Some(n) => n.to_string(),
+                None => return,
+            };
+
+            let (guild_id, inviter_name, inviter_rank) = {
+                match state.players.get(&player_id) {
+                    Some(p) => match p.guild_id {
+                        Some(gid) => (gid, p.username.clone(), p.guild_rank.clone()),
+                        None => {
+                            drop(p);
+                            guild_sys_msg(state, &player_id, "You are not in a guild.".into());
+                            return;
+                        }
+                    },
+                    None => return,
+                }
+            };
+
+            if inviter_rank != "leader" && inviter_rank != "officer" {
+                guild_sys_msg(state, &player_id, "Only leaders and officers can invite.".into());
+                return;
+            }
+
+            let target_id = {
+                state.players.iter()
+                    .find(|e| e.value().username.eq_ignore_ascii_case(&target_name) && e.value().id != player_id)
+                    .map(|e| e.value().id)
+            };
+
+            let target_id = match target_id {
+                Some(id) => id,
+                None => {
+                    guild_sys_msg(state, &player_id, format!("Player '{}' not found.", target_name));
+                    return;
+                }
+            };
+
+            let target_has_guild = state.players.get(&target_id)
+                .map(|p| p.guild_id.is_some())
+                .unwrap_or(false);
+            if target_has_guild {
+                guild_sys_msg(state, &player_id, format!("{} is already in a guild.", target_name));
+                return;
+            }
+
+            let guild_name = state.guilds.get(&guild_id)
+                .map(|g| g.name.clone())
+                .unwrap_or_default();
+
+            state.guild_invites.insert(target_id, (guild_id, inviter_name.clone(), std::time::Instant::now()));
+            guild_sys_msg(state, &player_id, format!("Guild invite sent to {}.", target_name));
+            guild_sys_msg(state, &target_id,
+                format!("🏰 {} invited you to join [{}]. Use the Guild panel (G key) or type /guild accept.", inviter_name, guild_name));
+        }
+
+        "accept" | "accept_invite" => {
+            let (guild_id, _inviter, invite_time) = match state.guild_invites.remove(&player_id) {
+                Some((_, data)) => data,
+                None => {
+                    guild_sys_msg(state, &player_id, "You have no pending guild invite.".into());
+                    return;
+                }
+            };
+
+            if invite_time.elapsed() > Duration::from_secs(300) {
+                guild_sys_msg(state, &player_id, "Guild invite has expired.".into());
+                return;
+            }
+
+            let already_in_guild = state.players.get(&player_id)
+                .map(|p| p.guild_id.is_some())
+                .unwrap_or(false);
+            if already_in_guild {
+                guild_sys_msg(state, &player_id, "You are already in a guild.".into());
+                return;
+            }
+
+            let guild_name = {
+                match state.guilds.get_mut(&guild_id) {
+                    Some(mut g) => {
+                        g.members.push(player_id);
+                        g.name.clone()
+                    },
+                    None => {
+                        guild_sys_msg(state, &player_id, "That guild no longer exists.".into());
+                        return;
+                    }
+                }
+            };
+
+            let player_name = {
+                if let Some(mut p) = state.players.get_mut(&player_id) {
+                    p.guild_id = Some(guild_id);
+                    p.guild_name = Some(guild_name.clone());
+                    p.guild_rank = "member".to_string();
+                    p.username.clone()
+                } else {
+                    return;
+                }
+            };
+
+            let members: Vec<Uuid> = state.guilds.get(&guild_id)
+                .map(|g| g.members.clone())
+                .unwrap_or_default();
+            for mid in &members {
+                guild_sys_msg(state, mid, format!("🏰 {} has joined the guild!", player_name));
+            }
+            send_guild_data_to_members(state, &guild_id);
+        }
+
+        "leave" => {
+            let (guild_id, player_name, player_rank) = {
+                match state.players.get(&player_id) {
+                    Some(p) => match p.guild_id {
+                        Some(gid) => (gid, p.username.clone(), p.guild_rank.clone()),
+                        None => {
+                            drop(p);
+                            guild_sys_msg(state, &player_id, "You are not in a guild.".into());
+                            return;
+                        }
+                    },
+                    None => return,
+                }
+            };
+
+            let (should_disband, remaining_members) = {
+                match state.guilds.get_mut(&guild_id) {
+                    Some(mut g) => {
+                        g.members.retain(|m| *m != player_id);
+                        g.officers.retain(|m| *m != player_id);
+
+                        if g.members.is_empty() {
+                            (true, Vec::new())
+                        } else if player_rank == "leader" {
+                            let new_leader = if let Some(&officer) = g.officers.first() {
+                                g.officers.retain(|o| *o != officer);
+                                officer
+                            } else {
+                                g.members[0]
+                            };
+                            g.leader_id = new_leader;
+                            (false, g.members.clone())
+                        } else {
+                            (false, g.members.clone())
+                        }
+                    },
+                    None => (true, Vec::new()),
+                }
+            };
+
+            if let Some(mut p) = state.players.get_mut(&player_id) {
+                p.guild_id = None;
+                p.guild_name = None;
+                p.guild_rank = String::new();
+            }
+            send_guild_cleared(state, &player_id);
+
+            if should_disband {
+                let guild_name_lower = state.guilds.get(&guild_id)
+                    .map(|g| g.name.to_lowercase());
+                state.guilds.remove(&guild_id);
+                if let Some(name) = guild_name_lower {
+                    state.guild_names.remove(&name);
+                }
+                guild_sys_msg(state, &player_id, "🏰 Guild has been disbanded.".into());
+            } else {
+                if player_rank == "leader" {
+                    let new_leader_id = state.guilds.get(&guild_id).map(|g| g.leader_id);
+                    if let Some(nlid) = new_leader_id {
+                        if let Some(mut p) = state.players.get_mut(&nlid) {
+                            p.guild_rank = "leader".to_string();
+                        }
+                    }
+                }
+                for mid in &remaining_members {
+                    guild_sys_msg(state, mid, format!("🏰 {} has left the guild.", player_name));
+                }
+                send_guild_data_to_members(state, &guild_id);
+            }
+        }
+
+        "kick" => {
+            let target_name = match payload.get("target").and_then(|v| v.as_str()) {
+                Some(n) => n.to_string(),
+                None => return,
+            };
+
+            let (guild_id, kicker_rank) = {
+                match state.players.get(&player_id) {
+                    Some(p) => match p.guild_id {
+                        Some(gid) => (gid, p.guild_rank.clone()),
+                        None => return,
+                    },
+                    None => return,
+                }
+            };
+
+            if kicker_rank != "leader" && kicker_rank != "officer" {
+                guild_sys_msg(state, &player_id, "Only leaders and officers can kick members.".into());
+                return;
+            }
+
+            let target_id = {
+                let guild = match state.guilds.get(&guild_id) {
+                    Some(g) => g,
+                    None => return,
+                };
+                guild.members.iter().find(|mid| {
+                    state.players.get(mid)
+                        .map(|p| p.username.eq_ignore_ascii_case(&target_name))
+                        .unwrap_or(false)
+                }).copied()
+            };
+
+            let target_id = match target_id {
+                Some(id) => id,
+                None => {
+                    guild_sys_msg(state, &player_id, format!("'{}' is not in your guild.", target_name));
+                    return;
+                }
+            };
+
+            if target_id == player_id {
+                guild_sys_msg(state, &player_id, "You cannot kick yourself. Use 'leave' instead.".into());
+                return;
+            }
+
+            let target_rank = state.players.get(&target_id)
+                .map(|p| p.guild_rank.clone())
+                .unwrap_or_default();
+            if target_rank == "leader" || (target_rank == "officer" && kicker_rank != "leader") {
+                guild_sys_msg(state, &player_id, "You cannot kick someone of equal or higher rank.".into());
+                return;
+            }
+
+            if let Some(mut g) = state.guilds.get_mut(&guild_id) {
+                g.members.retain(|m| *m != target_id);
+                g.officers.retain(|m| *m != target_id);
+            }
+
+            if let Some(mut p) = state.players.get_mut(&target_id) {
+                p.guild_id = None;
+                p.guild_name = None;
+                p.guild_rank = String::new();
+            }
+
+            let members: Vec<Uuid> = state.guilds.get(&guild_id)
+                .map(|g| g.members.clone())
+                .unwrap_or_default();
+            for mid in &members {
+                guild_sys_msg(state, mid, format!("🏰 {} has been kicked from the guild.", target_name));
+            }
+            guild_sys_msg(state, &target_id, "🏰 You have been kicked from the guild.".into());
+            send_guild_cleared(state, &target_id);
+            send_guild_data_to_members(state, &guild_id);
+        }
+
+        "promote" => {
+            let target_name = match payload.get("target").and_then(|v| v.as_str()) {
+                Some(n) => n.to_string(),
+                None => return,
+            };
+
+            let (guild_id, promoter_rank) = {
+                match state.players.get(&player_id) {
+                    Some(p) => match p.guild_id {
+                        Some(gid) => (gid, p.guild_rank.clone()),
+                        None => return,
+                    },
+                    None => return,
+                }
+            };
+
+            if promoter_rank != "leader" {
+                guild_sys_msg(state, &player_id, "Only the guild leader can promote members.".into());
+                return;
+            }
+
+            let target_id = {
+                let guild = match state.guilds.get(&guild_id) {
+                    Some(g) => g,
+                    None => return,
+                };
+                guild.members.iter().find(|mid| {
+                    state.players.get(mid)
+                        .map(|p| p.username.eq_ignore_ascii_case(&target_name))
+                        .unwrap_or(false)
+                }).copied()
+            };
+
+            let target_id = match target_id {
+                Some(id) if id != player_id => id,
+                _ => {
+                    guild_sys_msg(state, &player_id, format!("'{}' is not in your guild.", target_name));
+                    return;
+                }
+            };
+
+            let target_rank = state.players.get(&target_id)
+                .map(|p| p.guild_rank.clone())
+                .unwrap_or_default();
+
+            if target_rank == "officer" || target_rank == "leader" {
+                guild_sys_msg(state, &player_id, format!("{} is already an officer or higher.", target_name));
+                return;
+            }
+
+            if let Some(mut g) = state.guilds.get_mut(&guild_id) {
+                if !g.officers.contains(&target_id) {
+                    g.officers.push(target_id);
+                }
+            }
+
+            if let Some(mut p) = state.players.get_mut(&target_id) {
+                p.guild_rank = "officer".to_string();
+            }
+
+            let members: Vec<Uuid> = state.guilds.get(&guild_id)
+                .map(|g| g.members.clone())
+                .unwrap_or_default();
+            for mid in &members {
+                guild_sys_msg(state, mid, format!("🏰 {} has been promoted to Officer!", target_name));
+            }
+            send_guild_data_to_members(state, &guild_id);
+        }
+
+        "demote" => {
+            let target_name = match payload.get("target").and_then(|v| v.as_str()) {
+                Some(n) => n.to_string(),
+                None => return,
+            };
+
+            let (guild_id, demoter_rank) = {
+                match state.players.get(&player_id) {
+                    Some(p) => match p.guild_id {
+                        Some(gid) => (gid, p.guild_rank.clone()),
+                        None => return,
+                    },
+                    None => return,
+                }
+            };
+
+            if demoter_rank != "leader" {
+                guild_sys_msg(state, &player_id, "Only the guild leader can demote officers.".into());
+                return;
+            }
+
+            let target_id = {
+                let guild = match state.guilds.get(&guild_id) {
+                    Some(g) => g,
+                    None => return,
+                };
+                guild.officers.iter().find(|mid| {
+                    state.players.get(mid)
+                        .map(|p| p.username.eq_ignore_ascii_case(&target_name))
+                        .unwrap_or(false)
+                }).copied()
+            };
+
+            let target_id = match target_id {
+                Some(id) => id,
+                None => {
+                    guild_sys_msg(state, &player_id, format!("'{}' is not an officer.", target_name));
+                    return;
+                }
+            };
+
+            if let Some(mut g) = state.guilds.get_mut(&guild_id) {
+                g.officers.retain(|o| *o != target_id);
+            }
+
+            if let Some(mut p) = state.players.get_mut(&target_id) {
+                p.guild_rank = "member".to_string();
+            }
+
+            let members: Vec<Uuid> = state.guilds.get(&guild_id)
+                .map(|g| g.members.clone())
+                .unwrap_or_default();
+            for mid in &members {
+                guild_sys_msg(state, mid, format!("🏰 {} has been demoted to Member.", target_name));
+            }
+            send_guild_data_to_members(state, &guild_id);
+        }
+
+        "set_motd" => {
+            let motd = match payload.get("motd").and_then(|v| v.as_str()) {
+                Some(m) => m.to_string(),
+                None => return,
+            };
+
+            let (guild_id, player_rank) = {
+                match state.players.get(&player_id) {
+                    Some(p) => match p.guild_id {
+                        Some(gid) => (gid, p.guild_rank.clone()),
+                        None => return,
+                    },
+                    None => return,
+                }
+            };
+
+            if player_rank != "leader" && player_rank != "officer" {
+                guild_sys_msg(state, &player_id, "Only leaders and officers can set the MOTD.".into());
+                return;
+            }
+
+            if let Some(mut g) = state.guilds.get_mut(&guild_id) {
+                g.motd = motd.chars().take(200).collect();
+            }
+
+            send_guild_data_to_members(state, &guild_id);
+        }
+
+        "deposit_gold" => {
+            let amount = match payload.get("amount").and_then(|v| v.as_u64()) {
+                Some(a) if a > 0 => a,
+                _ => {
+                    guild_sys_msg(state, &player_id, "Invalid amount.".into());
+                    return;
+                }
+            };
+
+            let guild_id = {
+                match state.players.get(&player_id) {
+                    Some(p) => match p.guild_id {
+                        Some(gid) => gid,
+                        None => {
+                            drop(p);
+                            guild_sys_msg(state, &player_id, "You are not in a guild.".into());
+                            return;
+                        }
+                    },
+                    None => return,
+                }
+            };
+
+            let success = {
+                if let Some(mut p) = state.players.get_mut(&player_id) {
+                    if p.gold >= amount {
+                        p.gold -= amount;
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            };
+
+            if !success {
+                guild_sys_msg(state, &player_id, "Not enough gold.".into());
+                return;
+            }
+
+            if let Some(mut g) = state.guilds.get_mut(&guild_id) {
+                g.bank_gold += amount;
+            }
+
+            let player_name = state.players.get(&player_id)
+                .map(|p| p.username.clone())
+                .unwrap_or_default();
+            let members: Vec<Uuid> = state.guilds.get(&guild_id)
+                .map(|g| g.members.clone())
+                .unwrap_or_default();
+            for mid in &members {
+                guild_sys_msg(state, mid, format!("🏰 {} deposited {} gold into the guild bank.", player_name, amount));
+            }
+            send_guild_data_to_members(state, &guild_id);
+            send_stats_update_by_id(state, &player_id);
+        }
+
+        "chat" => {
+            let text = match payload.get("text").and_then(|v| v.as_str()) {
+                Some(t) if !t.is_empty() => t.to_string(),
+                _ => return,
+            };
+
+            let (guild_id, player_name) = {
+                match state.players.get(&player_id) {
+                    Some(p) => match p.guild_id {
+                        Some(gid) => (gid, p.username.clone()),
+                        None => {
+                            drop(p);
+                            guild_sys_msg(state, &player_id, "You are not in a guild.".into());
+                            return;
+                        }
+                    },
+                    None => return,
+                }
+            };
+
+            let members: Vec<Uuid> = state.guilds.get(&guild_id)
+                .map(|g| g.members.clone())
+                .unwrap_or_default();
+
+            let msg = json!({
+                "type": MSG_GUILD_CHAT,
+                "payload": {
+                    "sender": player_name,
+                    "text": text,
+                }
+            }).to_string();
+
+            for mid in &members {
+                state.send_to(mid, &msg);
+            }
+        }
+
+        "info" => {
+            let guild_id = state.players.get(&player_id).and_then(|p| p.guild_id);
+            if let Some(gid) = guild_id {
+                send_guild_data_to_members(state, &gid);
+            } else {
+                send_guild_cleared(state, &player_id);
+            }
+        }
+
+        _ => {}
+    }
+}
+
+// ─── Fishing Handler ────────────────────────────────────────
+
+fn handle_fishing_action(state: &Arc<AppState>, player_id: Uuid, payload: &serde_json::Value) {
+    let action = payload.get("action").and_then(|v| v.as_str()).unwrap_or("");
+    match action {
+        "cast" => {
+            // Check if player is near water (simplification: check if in certain zones)
+            let (px, py, lck) = match state.players.get(&player_id) {
+                Some(p) => (p.x, p.y, p.total_lck()),
+                None => return,
+            };
+            let zone_level = state.world.get_zone_level(px, py);
+
+            // Roll catch with 3-second simulated wait
+            let (name, icon, rarity, sell_value, special) = protocol::roll_fishing_catch(zone_level, lck);
+
+            // Create fish item and add to inventory
+            let mut fish_item = Item {
+                id: Uuid::new_v4().to_string(),
+                template_id: format!("fish_{}", name.to_lowercase().replace(' ', "_")),
+                name: name.to_string(),
+                item_type: ItemType::Material,
+                slot: None,
+                rarity,
+                level: zone_level,
+                stats: HashMap::new(),
+                affixes: vec![icon.to_string()],
+                quantity: 1,
+                description: format!("{} A {} caught while fishing. Sells for {}g.", icon, name, sell_value),
+                stackable: true,
+                enchant_level: 0,
+            };
+            if !special.is_empty() {
+                fish_item.stats.insert(special.to_string(), (zone_level as i32 / 5).max(1));
+            }
+
+            let rarity_name = match rarity { 0 => "Common", 1 => "Uncommon", 2 => "Rare", 3 => "Epic", _ => "Common" };
+            let added = if let Some(mut player) = state.players.get_mut(&player_id) {
+                player.add_item(fish_item)
+            } else { false };
+
+            if added {
+                let msg = json!({
+                    "type": MSG_FISHING_RESULT,
+                    "payload": {
+                        "success": true,
+                        "catch": name,
+                        "icon": icon,
+                        "rarity": rarity_name,
+                        "value": sell_value,
+                    }
+                }).to_string();
+                state.send_to(&player_id, &msg);
+                let chat_msg = json!({"type": MSG_CHAT_MESSAGE, "payload": {"sender":"System","text": format!("{} You caught a {} {}! ({}g)", icon, rarity_name, name, sell_value),"channel":"system"}}).to_string();
+                state.send_to(&player_id, &chat_msg);
+                send_inventory_update(state, &player_id);
+            } else {
+                let msg = json!({"type": MSG_CHAT_MESSAGE, "payload": {"sender":"System","text":"Inventory full! Can't keep the catch.","channel":"system"}}).to_string();
+                state.send_to(&player_id, &msg);
+            }
+        }
+        _ => {}
+    }
+}
+
+// ─── Faction/Reputation Handler ─────────────────────────────
+
+fn handle_faction_action(state: &Arc<AppState>, player_id: Uuid, payload: &serde_json::Value) {
+    let action = payload.get("action").and_then(|v| v.as_str()).unwrap_or("");
+    match action {
+        "info" => {
+            // Send all faction rep data to player
+            if let Some(player) = state.players.get(&player_id) {
+                let factions: Vec<serde_json::Value> = protocol::FACTIONS.iter().map(|(id, name, icon, desc)| {
+                    let rep = player.faction_rep.get(*id).copied().unwrap_or(0);
+                    let rank = protocol::rep_rank_name(rep);
+                    json!({
+                        "id": id,
+                        "name": name,
+                        "icon": icon,
+                        "description": desc,
+                        "rep": rep,
+                        "rank": rank,
+                    })
+                }).collect();
+                let msg = json!({
+                    "type": MSG_FACTION_DATA,
+                    "payload": { "factions": factions }
+                }).to_string();
+                drop(player);
+                state.send_to(&player_id, &msg);
+            }
+        }
+        _ => {}
+    }
+}
 
 fn send_stats_update(state: &Arc<AppState>, player: &PlayerData) {
+    // Calculate active set bonuses
+    let set_bonuses = protocol::calculate_set_bonuses(&player.equipment);
+    let active_sets: Vec<serde_json::Value> = set_bonuses.iter().map(|(name, icon, bonuses)| {
+        json!({
+            "name": name,
+            "icon": icon,
+            "bonuses": bonuses.iter().map(|(pieces, stat, val)| {
+                json!({"pieces": pieces, "stat": stat, "value": val})
+            }).collect::<Vec<_>>()
+        })
+    }).collect();
+
     let stats_msg = json!({
         "type": MSG_STATS_UPDATE,
         "payload": {
@@ -3231,11 +4448,12 @@ fn send_stats_update(state: &Arc<AppState>, player: &PlayerData) {
             "xpNeeded": player.xp_to_next_level(),
             "atk": player.total_atk(),
             "def": player.total_def(),
-            "spd": player.spd,
+            "spd": player.spd + player.total_spd_bonus(),
             "lck": player.total_lck(),
             "gold": player.gold,
             "statPoints": player.stat_points,
             "class": player.class,
+            "setBonuses": active_sets,
         }
     }).to_string();
     state.send_to(&player.id, &stats_msg);
@@ -3453,6 +4671,7 @@ fn spawn_xp_orbs(state: &Arc<AppState>) {
             stats,
             description: format!("+{} XP", xp_amount),
             affixes: vec![],
+            enchant_level: 0,
         };
 
         let ground_item = GroundItem {
@@ -4374,14 +5593,13 @@ async fn game_loop(state: Arc<AppState>) {
 }
 
 fn regen_safe_zone_players(state: &Arc<AppState>) {
-    let safe_radius = 20.0;
     let mut healed: Vec<Uuid> = Vec::new();
 
     for mut entry in state.players.iter_mut() {
         let player = entry.value_mut();
         if player.dead { continue; }
-        let dist = (player.x * player.x + player.y * player.y).sqrt();
-        if dist < safe_radius && (player.hp < player.max_hp || player.mp < player.max_mp) {
+        // Use world's safe zone check (covers all towns)
+        if state.world.is_safe_zone(player.x, player.y) && (player.hp < player.max_hp || player.mp < player.max_mp) {
             let hp_regen = (player.max_hp as f64 * 0.05).max(1.0) as i32;
             let mp_regen = (player.max_mp as f64 * 0.05).max(1.0) as i32;
             player.hp = (player.hp + hp_regen).min(player.max_hp);
@@ -4423,15 +5641,7 @@ fn update_player_movement(state: &Arc<AppState>) {
 
 fn update_dead_players(state: &Arc<AppState>) {
     let mut to_respawn = Vec::new();
-
-    // Town/safe zone spawn points
-    const SPAWN_POINTS: &[(f64, f64)] = &[
-        (0.0, 0.0),      // Central town
-        (50.0, 50.0),     // Northeast outpost
-        (-50.0, 45.0),    // Northwest camp
-        (-45.0, -55.0),   // Southwest settlement
-        (55.0, -50.0),    // Southeast village
-    ];
+    use crate::world::TOWNS;
 
     for mut entry in state.players.iter_mut() {
         let player = entry.value_mut();
@@ -4442,14 +5652,14 @@ fn update_dead_players(state: &Arc<AppState>) {
                 let xp_loss = (player.xp as f64 * 0.05) as u64;
                 player.xp = player.xp.saturating_sub(xp_loss);
 
-                // Find nearest spawn point to death location
-                let (spawn_x, spawn_y) = SPAWN_POINTS.iter()
+                // Find nearest town to death location
+                let (spawn_x, spawn_y) = TOWNS.iter()
                     .min_by(|a, b| {
                         let da = (a.0 - player.x).powi(2) + (a.1 - player.y).powi(2);
                         let db = (b.0 - player.x).powi(2) + (b.1 - player.y).powi(2);
                         da.partial_cmp(&db).unwrap()
                     })
-                    .copied()
+                    .map(|t| (t.0, t.1))
                     .unwrap_or((0.0, 0.0));
 
                 to_respawn.push((player.id, xp_loss, spawn_x, spawn_y));
