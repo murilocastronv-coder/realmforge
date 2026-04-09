@@ -461,6 +461,23 @@ async fn handle_message(
                 handle_quest_list_request(state, pid, sender);
             }
         }
+        MSG_NPC_INTERACT => {
+            if let Some(pid) = player_id {
+                if let Some(npc_id) = msg.payload.get("npcId").and_then(|v| v.as_str()) {
+                    handle_npc_interact(state, pid, npc_id);
+                }
+            }
+        }
+        MSG_SKILL_TREE_UNLOCK => {
+            if let Some(pid) = player_id {
+                handle_skill_tree_unlock(state, pid, &msg.payload);
+            }
+        }
+        MSG_SKILL_TREE_REQUEST => {
+            if let Some(pid) = player_id {
+                handle_skill_tree_request(state, pid);
+            }
+        }
         _ => {
             warn!("Unknown message type: {}", msg.msg_type);
         }
@@ -3090,6 +3107,115 @@ fn handle_craft(state: &Arc<AppState>, player_id: Uuid, recipe_id: &str) {
     }
 }
 
+// ─── Skill Tree Handlers ────────────────────────────────────
+
+fn handle_skill_tree_unlock(state: &Arc<AppState>, player_id: Uuid, payload: &serde_json::Value) {
+    let node_id = match payload.get("nodeId").and_then(|v| v.as_str()) {
+        Some(n) => n,
+        None => return,
+    };
+
+    let node = match SKILL_TREES.iter().find(|n| n.id == node_id) {
+        Some(n) => n,
+        None => return,
+    };
+
+    let result_msg = {
+        let mut player = match state.players.get_mut(&player_id) {
+            Some(p) => p,
+            None => return,
+        };
+
+        // Check class matches
+        if player.class != node.class {
+            return;
+        }
+
+        // Check not already unlocked
+        if player.skill_tree_unlocked.iter().any(|id| id == node_id) {
+            return;
+        }
+
+        // Check prerequisites
+        for req in node.requires {
+            if !player.skill_tree_unlocked.iter().any(|id| id == *req) {
+                return;
+            }
+        }
+
+        // Check skill points
+        if player.skill_points < node.skill_point_cost {
+            return;
+        }
+
+        // Apply unlock
+        player.skill_points -= node.skill_point_cost;
+        player.skill_tree_unlocked.push(node_id.to_string());
+
+        // Apply stat bonuses
+        match node.bonus_type {
+            "hp" => { player.max_hp += node.bonus_value; player.hp += node.bonus_value; }
+            "mp" => { player.max_mp += node.bonus_value; player.mp += node.bonus_value; }
+            "atk" => { player.atk += node.bonus_value; }
+            "def" => { player.def += node.bonus_value; }
+            "spd" => { player.spd += node.bonus_value; }
+            "lck" => { player.lck += node.bonus_value; }
+            _ => {} // gold_mult, xp_mult, lifesteal, crit handled in combat calculations
+        }
+
+        // Send stats update
+        send_stats_update(state, &player);
+
+        json!({
+            "type": MSG_SKILL_TREE_DATA,
+            "payload": {
+                "unlocked": player.skill_tree_unlocked.clone(),
+                "skillPoints": player.skill_points,
+                "message": format!("Unlocked: {}!", node.name),
+            }
+        }).to_string()
+    };
+
+    state.send_to(&player_id, &result_msg);
+}
+
+fn handle_skill_tree_request(state: &Arc<AppState>, player_id: Uuid) {
+    let player = match state.players.get(&player_id) {
+        Some(p) => p,
+        None => return,
+    };
+
+    let class = player.class.clone();
+    let class_nodes: Vec<serde_json::Value> = SKILL_TREES.iter()
+        .filter(|n| n.class == class)
+        .map(|n| json!({
+            "id": n.id,
+            "name": n.name,
+            "description": n.description,
+            "icon": n.icon,
+            "tree": n.tree,
+            "tier": n.tier,
+            "requires": n.requires,
+            "bonusType": n.bonus_type,
+            "bonusValue": n.bonus_value,
+            "cost": n.skill_point_cost,
+            "unlocked": player.skill_tree_unlocked.contains(&n.id.to_string()),
+        }))
+        .collect();
+
+    let msg = json!({
+        "type": MSG_SKILL_TREE_DATA,
+        "payload": {
+            "class": class,
+            "nodes": class_nodes,
+            "unlocked": player.skill_tree_unlocked.clone(),
+            "skillPoints": player.skill_points,
+        }
+    }).to_string();
+    drop(player);
+    state.send_to(&player_id, &msg);
+}
+
 // ─── Helper Functions ───────────────────────────────────────
 
 fn send_stats_update(state: &Arc<AppState>, player: &PlayerData) {
@@ -3190,6 +3316,7 @@ fn check_and_apply_level_up(player: &mut PlayerData, state: &Arc<AppState>) -> b
         // Grant stat points (3 per level, +1 bonus every 5 levels)
         let bonus = if player.level % 5 == 0 { 1 } else { 0 };
         player.stat_points += 3 + bonus;
+        player.skill_points += 1;
 
         leveled = true;
         info!("Player {} leveled up to {}! ({} stat points available)", player.username, player.level, player.stat_points);
@@ -4029,6 +4156,83 @@ fn check_achievements(state: &Arc<AppState>, player_id: Uuid) {
     }
 }
 
+// ─── NPC Interaction ─────────────────────────────────────────
+
+fn handle_npc_interact(state: &Arc<AppState>, player_id: Uuid, npc_id: &str) {
+    // NPC definitions with their dialogue and roles
+    let dialogue = match npc_id {
+        "shopkeeper" => json!({
+            "npcName": "Elara the Shopkeeper",
+            "portrait": "🏪",
+            "lines": [
+                "Welcome, adventurer! Browse my wares.",
+                "I buy and sell the finest goods in town.",
+            ],
+            "actions": [{ "label": "Open Shop", "action": "shop" }],
+        }),
+        "quest_giver" => json!({
+            "npcName": "Captain Aldric",
+            "portrait": "⚔️",
+            "lines": [
+                "Hail, brave soul! The realm needs your help.",
+                "There are many tasks that need doing. Check the quest board!",
+            ],
+            "actions": [{ "label": "View Quests", "action": "quests" }],
+        }),
+        "blacksmith" => json!({
+            "npcName": "Grimjaw the Blacksmith",
+            "portrait": "🔨",
+            "lines": [
+                "Need something forged? I'm your dwarf.",
+                "Bring me materials and I'll craft wonders.",
+            ],
+            "actions": [{ "label": "Open Crafting", "action": "craft" }],
+        }),
+        "banker" => json!({
+            "npcName": "Theron the Banker",
+            "portrait": "🏦",
+            "lines": [
+                "Your valuables are safe with me.",
+                "Deposit items to keep them safe from death.",
+            ],
+            "actions": [{ "label": "Open Bank", "action": "bank" }],
+        }),
+        "healer" => json!({
+            "npcName": "Sister Meridia",
+            "portrait": "💚",
+            "lines": [
+                "Light bless you, traveler.",
+                "Rest here and let me tend your wounds.",
+            ],
+            "actions": [{ "label": "Heal", "action": "heal" }],
+        }),
+        "arena_master" => json!({
+            "npcName": "Brutus the Arena Master",
+            "portrait": "🏟️",
+            "lines": [
+                "Think you're tough? Prove it in the arena!",
+                "Fight waves of enemies for glory and loot.",
+            ],
+            "actions": [{ "label": "Enter Arena", "action": "arena" }],
+        }),
+        _ => json!({
+            "npcName": "Villager",
+            "portrait": "👤",
+            "lines": ["Nice weather we're having.", "Be careful out there, adventurer!"],
+            "actions": [],
+        }),
+    };
+
+    let msg = json!({
+        "type": MSG_NPC_DIALOGUE,
+        "payload": {
+            "npcId": npc_id,
+            "dialogue": dialogue,
+        }
+    }).to_string();
+    state.send_to(&player_id, &msg);
+}
+
 // ─── World Boss System ────────────────────────────────────────
 
 fn try_spawn_world_boss(state: &Arc<AppState>, _tick: u64) {
@@ -4220,6 +4424,15 @@ fn update_player_movement(state: &Arc<AppState>) {
 fn update_dead_players(state: &Arc<AppState>) {
     let mut to_respawn = Vec::new();
 
+    // Town/safe zone spawn points
+    const SPAWN_POINTS: &[(f64, f64)] = &[
+        (0.0, 0.0),      // Central town
+        (50.0, 50.0),     // Northeast outpost
+        (-50.0, 45.0),    // Northwest camp
+        (-45.0, -55.0),   // Southwest settlement
+        (55.0, -50.0),    // Southeast village
+    ];
+
     for mut entry in state.players.iter_mut() {
         let player = entry.value_mut();
         if player.dead {
@@ -4229,26 +4442,36 @@ fn update_dead_players(state: &Arc<AppState>) {
                 let xp_loss = (player.xp as f64 * 0.05) as u64;
                 player.xp = player.xp.saturating_sub(xp_loss);
 
-                to_respawn.push((player.id, xp_loss));
+                // Find nearest spawn point to death location
+                let (spawn_x, spawn_y) = SPAWN_POINTS.iter()
+                    .min_by(|a, b| {
+                        let da = (a.0 - player.x).powi(2) + (a.1 - player.y).powi(2);
+                        let db = (b.0 - player.x).powi(2) + (b.1 - player.y).powi(2);
+                        da.partial_cmp(&db).unwrap()
+                    })
+                    .copied()
+                    .unwrap_or((0.0, 0.0));
+
+                to_respawn.push((player.id, xp_loss, spawn_x, spawn_y));
                 player.dead = false;
-                player.hp = player.max_hp; // Respawn at full HP
-                player.mp = player.max_mp; // Respawn at full MP
-                player.x = 0.0; // Respawn at town center
-                player.y = 0.0;
-                player.target_x = 0.0;
-                player.target_y = 0.0;
+                player.hp = player.max_hp;
+                player.mp = player.max_mp;
+                player.x = spawn_x;
+                player.y = spawn_y;
+                player.target_x = spawn_x;
+                player.target_y = spawn_y;
             }
         }
     }
 
-    for (pid, xp_loss) in to_respawn {
+    for (pid, xp_loss, sx, sy) in to_respawn {
         let (hp, max_hp) = match state.players.get(&pid) {
             Some(player) => (player.hp, player.max_hp),
             None => continue,
         };
         let respawn_msg = json!({
             "type": MSG_RESPAWN,
-            "payload": { "x": 0, "y": 0, "hp": hp, "maxHp": max_hp }
+            "payload": { "x": sx, "y": sy, "hp": hp, "maxHp": max_hp }
         }).to_string();
         state.send_to(&pid, &respawn_msg);
 

@@ -28,6 +28,8 @@ pub const MSG_QUEST_ACCEPT: u8 = 20;   // Client → Server: accept a quest
 pub const MSG_QUEST_TURN_IN: u8 = 21;  // Client → Server: turn in a completed quest
 pub const MSG_QUEST_LIST_REQUEST: u8 = 22; // Client → Server: request quest list
 pub const MSG_NPC_INTERACT: u8 = 23;   // Client → Server: interact with NPC
+pub const MSG_SKILL_TREE_UNLOCK: u8 = 24;  // Client → Server: unlock a skill tree node
+pub const MSG_SKILL_TREE_REQUEST: u8 = 25;  // Client → Server: request skill tree data
 
 // Server → Client
 pub const MSG_AUTH_RESULT: u8 = 50;
@@ -60,6 +62,7 @@ pub const MSG_ACHIEVEMENT_UNLOCK: u8 = 82; // Server → Client: achievement unl
 pub const MSG_WORLD_BOSS_SPAWN: u8 = 83;   // Server → Client: world boss spawned
 pub const MSG_WORLD_BOSS_DEATH: u8 = 84;   // Server → Client: world boss defeated
 pub const MSG_NPC_DIALOGUE: u8 = 85;       // Server → Client: NPC dialogue data
+pub const MSG_SKILL_TREE_DATA: u8 = 86;    // Server → Client: skill tree state
 
 // ─── Message Envelope ────────────────────────────────────────
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -236,6 +239,8 @@ pub struct PlayerData {
     pub achievements: Vec<String>,   // unlocked achievement IDs
     pub achievement_progress: HashMap<String, u32>, // achievement_id -> progress count
     pub stats_tracker: StatsTracker, // lifetime stats for achievements/quests
+    pub skill_tree_unlocked: Vec<String>,  // unlocked skill tree node IDs
+    pub skill_points: u32,                 // available skill tree points (1 per level)
 }
 
 impl PlayerData {
@@ -288,6 +293,8 @@ impl PlayerData {
             achievements: Vec::new(),
             achievement_progress: HashMap::new(),
             stats_tracker: StatsTracker::default(),
+            skill_tree_unlocked: Vec::new(),
+            skill_points: 0,
         }
     }
 
@@ -1365,4 +1372,103 @@ pub static WORLD_BOSSES: &[WorldBossDef] = &[
         phase_thresholds: &[0.75, 0.50, 0.25],
         summon_count: 6,
     },
+];
+
+// ─── Skill Trees ────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct SkillTreeNode {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub description: &'static str,
+    pub icon: &'static str,
+    pub class: &'static str,       // warrior, mage, ranger, rogue
+    pub tree: &'static str,        // tree name (e.g. "Arms", "Protection")
+    pub tier: u32,                 // 1-5, determines position and cost
+    pub requires: &'static [&'static str], // prerequisite node IDs
+    pub bonus_type: &'static str,  // "hp", "mp", "atk", "def", "spd", "lck", "crit", "lifesteal", "xp_mult", "gold_mult", "skill_damage"
+    pub bonus_value: i32,          // flat bonus amount
+    pub skill_point_cost: u32,     // skill points needed to unlock
+}
+
+pub static SKILL_TREES: &[SkillTreeNode] = &[
+    // ═══ WARRIOR ═══
+    // -- Arms (offensive) --
+    SkillTreeNode { id: "w_arms_1", name: "Weapon Training", description: "+5 ATK from mastering weapon techniques", icon: "⚔️", class: "warrior", tree: "Arms", tier: 1, requires: &[], bonus_type: "atk", bonus_value: 5, skill_point_cost: 1 },
+    SkillTreeNode { id: "w_arms_2", name: "Heavy Strikes", description: "+8 ATK with powerful overhead swings", icon: "💥", class: "warrior", tree: "Arms", tier: 2, requires: &["w_arms_1"], bonus_type: "atk", bonus_value: 8, skill_point_cost: 2 },
+    SkillTreeNode { id: "w_arms_3", name: "Critical Edge", description: "+10 LCK for critical hit chance", icon: "🎯", class: "warrior", tree: "Arms", tier: 3, requires: &["w_arms_2"], bonus_type: "lck", bonus_value: 10, skill_point_cost: 3 },
+    SkillTreeNode { id: "w_arms_4", name: "Bloodthirst", description: "Lifesteal 5% of damage dealt", icon: "🩸", class: "warrior", tree: "Arms", tier: 4, requires: &["w_arms_3"], bonus_type: "lifesteal", bonus_value: 5, skill_point_cost: 4 },
+    SkillTreeNode { id: "w_arms_5", name: "Warlord's Fury", description: "+15 ATK and +5 SPD battle rage", icon: "🔥", class: "warrior", tree: "Arms", tier: 5, requires: &["w_arms_4"], bonus_type: "atk", bonus_value: 15, skill_point_cost: 5 },
+    // -- Protection (defensive) --
+    SkillTreeNode { id: "w_prot_1", name: "Shield Wall", description: "+5 DEF from shield mastery", icon: "🛡️", class: "warrior", tree: "Protection", tier: 1, requires: &[], bonus_type: "def", bonus_value: 5, skill_point_cost: 1 },
+    SkillTreeNode { id: "w_prot_2", name: "Iron Skin", description: "+8 DEF from hardened resolve", icon: "🪨", class: "warrior", tree: "Protection", tier: 2, requires: &["w_prot_1"], bonus_type: "def", bonus_value: 8, skill_point_cost: 2 },
+    SkillTreeNode { id: "w_prot_3", name: "Vitality Surge", description: "+50 HP from constitution training", icon: "❤️", class: "warrior", tree: "Protection", tier: 3, requires: &["w_prot_2"], bonus_type: "hp", bonus_value: 50, skill_point_cost: 3 },
+    SkillTreeNode { id: "w_prot_4", name: "Fortification", description: "+12 DEF from unbreakable stance", icon: "🏰", class: "warrior", tree: "Protection", tier: 4, requires: &["w_prot_3"], bonus_type: "def", bonus_value: 12, skill_point_cost: 4 },
+    SkillTreeNode { id: "w_prot_5", name: "Immortal Guard", description: "+80 HP and +10 DEF fortress defense", icon: "⭐", class: "warrior", tree: "Protection", tier: 5, requires: &["w_prot_4"], bonus_type: "hp", bonus_value: 80, skill_point_cost: 5 },
+    // -- Tactics (utility) --
+    SkillTreeNode { id: "w_tact_1", name: "Swift March", description: "+3 SPD from tactical movement", icon: "👢", class: "warrior", tree: "Tactics", tier: 1, requires: &[], bonus_type: "spd", bonus_value: 3, skill_point_cost: 1 },
+    SkillTreeNode { id: "w_tact_2", name: "Battle Sense", description: "+5 LCK from battlefield awareness", icon: "👁️", class: "warrior", tree: "Tactics", tier: 2, requires: &["w_tact_1"], bonus_type: "lck", bonus_value: 5, skill_point_cost: 2 },
+    SkillTreeNode { id: "w_tact_3", name: "War Cry", description: "+5 ATK from intimidating presence", icon: "📢", class: "warrior", tree: "Tactics", tier: 3, requires: &["w_tact_2"], bonus_type: "atk", bonus_value: 5, skill_point_cost: 3 },
+    SkillTreeNode { id: "w_tact_4", name: "Bounty Hunter", description: "+15% gold from kills", icon: "💰", class: "warrior", tree: "Tactics", tier: 4, requires: &["w_tact_3"], bonus_type: "gold_mult", bonus_value: 15, skill_point_cost: 4 },
+    SkillTreeNode { id: "w_tact_5", name: "Commander", description: "+10% XP from leadership", icon: "👑", class: "warrior", tree: "Tactics", tier: 5, requires: &["w_tact_4"], bonus_type: "xp_mult", bonus_value: 10, skill_point_cost: 5 },
+
+    // ═══ MAGE ═══
+    // -- Arcane (raw power) --
+    SkillTreeNode { id: "m_arc_1", name: "Arcane Focus", description: "+20 MP from mana attunement", icon: "🔮", class: "mage", tree: "Arcane", tier: 1, requires: &[], bonus_type: "mp", bonus_value: 20, skill_point_cost: 1 },
+    SkillTreeNode { id: "m_arc_2", name: "Spell Power", description: "+8 ATK from magical amplification", icon: "✨", class: "mage", tree: "Arcane", tier: 2, requires: &["m_arc_1"], bonus_type: "atk", bonus_value: 8, skill_point_cost: 2 },
+    SkillTreeNode { id: "m_arc_3", name: "Mana Storm", description: "+40 MP and +5 ATK from arcane mastery", icon: "🌀", class: "mage", tree: "Arcane", tier: 3, requires: &["m_arc_2"], bonus_type: "mp", bonus_value: 40, skill_point_cost: 3 },
+    SkillTreeNode { id: "m_arc_4", name: "Arcane Barrier", description: "+30 HP from magical shield", icon: "🔵", class: "mage", tree: "Arcane", tier: 4, requires: &["m_arc_3"], bonus_type: "hp", bonus_value: 30, skill_point_cost: 4 },
+    SkillTreeNode { id: "m_arc_5", name: "Archmage", description: "+15 ATK from supreme magical power", icon: "🌟", class: "mage", tree: "Arcane", tier: 5, requires: &["m_arc_4"], bonus_type: "atk", bonus_value: 15, skill_point_cost: 5 },
+    // -- Elemental (damage) --
+    SkillTreeNode { id: "m_elem_1", name: "Fire Attunement", description: "+5 ATK from fire magic basics", icon: "🔥", class: "mage", tree: "Elemental", tier: 1, requires: &[], bonus_type: "atk", bonus_value: 5, skill_point_cost: 1 },
+    SkillTreeNode { id: "m_elem_2", name: "Frost Nova", description: "+3 DEF from frost armor", icon: "❄️", class: "mage", tree: "Elemental", tier: 2, requires: &["m_elem_1"], bonus_type: "def", bonus_value: 3, skill_point_cost: 2 },
+    SkillTreeNode { id: "m_elem_3", name: "Lightning Mastery", description: "+10 ATK and +5 SPD from lightning", icon: "⚡", class: "mage", tree: "Elemental", tier: 3, requires: &["m_elem_2"], bonus_type: "atk", bonus_value: 10, skill_point_cost: 3 },
+    SkillTreeNode { id: "m_elem_4", name: "Elemental Surge", description: "+10 LCK from elemental chaos", icon: "🌈", class: "mage", tree: "Elemental", tier: 4, requires: &["m_elem_3"], bonus_type: "lck", bonus_value: 10, skill_point_cost: 4 },
+    SkillTreeNode { id: "m_elem_5", name: "Primordial Force", description: "+20 ATK from elemental mastery", icon: "💎", class: "mage", tree: "Elemental", tier: 5, requires: &["m_elem_4"], bonus_type: "atk", bonus_value: 20, skill_point_cost: 5 },
+    // -- Mysticism (utility) --
+    SkillTreeNode { id: "m_myst_1", name: "Meditation", description: "+30 MP from deep focus", icon: "🧘", class: "mage", tree: "Mysticism", tier: 1, requires: &[], bonus_type: "mp", bonus_value: 30, skill_point_cost: 1 },
+    SkillTreeNode { id: "m_myst_2", name: "Enchant", description: "+5 LCK from magical luck", icon: "🪄", class: "mage", tree: "Mysticism", tier: 2, requires: &["m_myst_1"], bonus_type: "lck", bonus_value: 5, skill_point_cost: 2 },
+    SkillTreeNode { id: "m_myst_3", name: "Blink", description: "+5 SPD from spatial magic", icon: "💨", class: "mage", tree: "Mysticism", tier: 3, requires: &["m_myst_2"], bonus_type: "spd", bonus_value: 5, skill_point_cost: 3 },
+    SkillTreeNode { id: "m_myst_4", name: "Wisdom", description: "+15% XP from knowledge", icon: "📖", class: "mage", tree: "Mysticism", tier: 4, requires: &["m_myst_3"], bonus_type: "xp_mult", bonus_value: 15, skill_point_cost: 4 },
+    SkillTreeNode { id: "m_myst_5", name: "Transcendence", description: "+60 MP and +10 ATK from enlightenment", icon: "🌠", class: "mage", tree: "Mysticism", tier: 5, requires: &["m_myst_4"], bonus_type: "mp", bonus_value: 60, skill_point_cost: 5 },
+
+    // ═══ RANGER ═══
+    // -- Marksmanship (damage) --
+    SkillTreeNode { id: "r_mark_1", name: "Steady Aim", description: "+5 ATK from precise shooting", icon: "🏹", class: "ranger", tree: "Marksmanship", tier: 1, requires: &[], bonus_type: "atk", bonus_value: 5, skill_point_cost: 1 },
+    SkillTreeNode { id: "r_mark_2", name: "Eagle Eye", description: "+8 LCK from keen sight", icon: "🦅", class: "ranger", tree: "Marksmanship", tier: 2, requires: &["r_mark_1"], bonus_type: "lck", bonus_value: 8, skill_point_cost: 2 },
+    SkillTreeNode { id: "r_mark_3", name: "Rapid Fire", description: "+8 ATK from faster shooting", icon: "💫", class: "ranger", tree: "Marksmanship", tier: 3, requires: &["r_mark_2"], bonus_type: "atk", bonus_value: 8, skill_point_cost: 3 },
+    SkillTreeNode { id: "r_mark_4", name: "Piercing Shot", description: "+12 ATK ignoring some armor", icon: "🎯", class: "ranger", tree: "Marksmanship", tier: 4, requires: &["r_mark_3"], bonus_type: "atk", bonus_value: 12, skill_point_cost: 4 },
+    SkillTreeNode { id: "r_mark_5", name: "Sniper's Mark", description: "+15 LCK for devastating crits", icon: "⭐", class: "ranger", tree: "Marksmanship", tier: 5, requires: &["r_mark_4"], bonus_type: "lck", bonus_value: 15, skill_point_cost: 5 },
+    // -- Survival (defense/utility) --
+    SkillTreeNode { id: "r_surv_1", name: "Thick Hide", description: "+4 DEF from nature armor", icon: "🌿", class: "ranger", tree: "Survival", tier: 1, requires: &[], bonus_type: "def", bonus_value: 4, skill_point_cost: 1 },
+    SkillTreeNode { id: "r_surv_2", name: "Evasion", description: "+5 SPD from agile dodging", icon: "💨", class: "ranger", tree: "Survival", tier: 2, requires: &["r_surv_1"], bonus_type: "spd", bonus_value: 5, skill_point_cost: 2 },
+    SkillTreeNode { id: "r_surv_3", name: "Nature's Gift", description: "+40 HP from forest blessing", icon: "🌳", class: "ranger", tree: "Survival", tier: 3, requires: &["r_surv_2"], bonus_type: "hp", bonus_value: 40, skill_point_cost: 3 },
+    SkillTreeNode { id: "r_surv_4", name: "Camouflage", description: "+8 DEF from natural concealment", icon: "🍃", class: "ranger", tree: "Survival", tier: 4, requires: &["r_surv_3"], bonus_type: "def", bonus_value: 8, skill_point_cost: 4 },
+    SkillTreeNode { id: "r_surv_5", name: "Wild Spirit", description: "+60 HP and +5 SPD from nature bond", icon: "🐺", class: "ranger", tree: "Survival", tier: 5, requires: &["r_surv_4"], bonus_type: "hp", bonus_value: 60, skill_point_cost: 5 },
+    // -- Trapping (utility/economy) --
+    SkillTreeNode { id: "r_trap_1", name: "Scavenger", description: "+5 LCK for better loot", icon: "🔍", class: "ranger", tree: "Trapping", tier: 1, requires: &[], bonus_type: "lck", bonus_value: 5, skill_point_cost: 1 },
+    SkillTreeNode { id: "r_trap_2", name: "Trap Master", description: "+3 ATK from trap damage", icon: "🪤", class: "ranger", tree: "Trapping", tier: 2, requires: &["r_trap_1"], bonus_type: "atk", bonus_value: 3, skill_point_cost: 2 },
+    SkillTreeNode { id: "r_trap_3", name: "Tracker", description: "+3 SPD from pathfinding", icon: "🐾", class: "ranger", tree: "Trapping", tier: 3, requires: &["r_trap_2"], bonus_type: "spd", bonus_value: 3, skill_point_cost: 3 },
+    SkillTreeNode { id: "r_trap_4", name: "Fortune Finder", description: "+20% gold from kills", icon: "💰", class: "ranger", tree: "Trapping", tier: 4, requires: &["r_trap_3"], bonus_type: "gold_mult", bonus_value: 20, skill_point_cost: 4 },
+    SkillTreeNode { id: "r_trap_5", name: "Master Trapper", description: "+10 ATK and +10 LCK from mastery", icon: "🏆", class: "ranger", tree: "Trapping", tier: 5, requires: &["r_trap_4"], bonus_type: "lck", bonus_value: 10, skill_point_cost: 5 },
+
+    // ═══ ROGUE ═══
+    // -- Assassination (burst damage) --
+    SkillTreeNode { id: "ro_assa_1", name: "Backstab", description: "+5 ATK from surprise attacks", icon: "🗡️", class: "rogue", tree: "Assassination", tier: 1, requires: &[], bonus_type: "atk", bonus_value: 5, skill_point_cost: 1 },
+    SkillTreeNode { id: "ro_assa_2", name: "Poison Blade", description: "+8 ATK from venomous weapons", icon: "☠️", class: "rogue", tree: "Assassination", tier: 2, requires: &["ro_assa_1"], bonus_type: "atk", bonus_value: 8, skill_point_cost: 2 },
+    SkillTreeNode { id: "ro_assa_3", name: "Expose Weakness", description: "+12 LCK for critical openings", icon: "💀", class: "rogue", tree: "Assassination", tier: 3, requires: &["ro_assa_2"], bonus_type: "lck", bonus_value: 12, skill_point_cost: 3 },
+    SkillTreeNode { id: "ro_assa_4", name: "Execute", description: "+12 ATK for finishing blows", icon: "⚰️", class: "rogue", tree: "Assassination", tier: 4, requires: &["ro_assa_3"], bonus_type: "atk", bonus_value: 12, skill_point_cost: 4 },
+    SkillTreeNode { id: "ro_assa_5", name: "Death's Embrace", description: "+20 ATK and lifesteal 8%", icon: "💀", class: "rogue", tree: "Assassination", tier: 5, requires: &["ro_assa_4"], bonus_type: "atk", bonus_value: 20, skill_point_cost: 5 },
+    // -- Shadow (evasion) --
+    SkillTreeNode { id: "ro_shad_1", name: "Shadow Step", description: "+5 SPD from shadow movement", icon: "🌑", class: "rogue", tree: "Shadow", tier: 1, requires: &[], bonus_type: "spd", bonus_value: 5, skill_point_cost: 1 },
+    SkillTreeNode { id: "ro_shad_2", name: "Smoke Screen", description: "+5 DEF from obscured form", icon: "💨", class: "rogue", tree: "Shadow", tier: 2, requires: &["ro_shad_1"], bonus_type: "def", bonus_value: 5, skill_point_cost: 2 },
+    SkillTreeNode { id: "ro_shad_3", name: "Fade", description: "+8 SPD from becoming invisible", icon: "👻", class: "rogue", tree: "Shadow", tier: 3, requires: &["ro_shad_2"], bonus_type: "spd", bonus_value: 8, skill_point_cost: 3 },
+    SkillTreeNode { id: "ro_shad_4", name: "Shadow Armor", description: "+10 DEF from dark protection", icon: "🌚", class: "rogue", tree: "Shadow", tier: 4, requires: &["ro_shad_3"], bonus_type: "def", bonus_value: 10, skill_point_cost: 4 },
+    SkillTreeNode { id: "ro_shad_5", name: "Phantom", description: "+12 SPD and +8 DEF from phase shift", icon: "⭐", class: "rogue", tree: "Shadow", tier: 5, requires: &["ro_shad_4"], bonus_type: "spd", bonus_value: 12, skill_point_cost: 5 },
+    // -- Subtlety (utility/economy) --
+    SkillTreeNode { id: "ro_subt_1", name: "Pickpocket", description: "+10% gold from kills", icon: "👛", class: "rogue", tree: "Subtlety", tier: 1, requires: &[], bonus_type: "gold_mult", bonus_value: 10, skill_point_cost: 1 },
+    SkillTreeNode { id: "ro_subt_2", name: "Lucky Strike", description: "+8 LCK from fortune favoring", icon: "🍀", class: "rogue", tree: "Subtlety", tier: 2, requires: &["ro_subt_1"], bonus_type: "lck", bonus_value: 8, skill_point_cost: 2 },
+    SkillTreeNode { id: "ro_subt_3", name: "Nimble Fingers", description: "+3 SPD from dexterity", icon: "🤏", class: "rogue", tree: "Subtlety", tier: 3, requires: &["ro_subt_2"], bonus_type: "spd", bonus_value: 3, skill_point_cost: 3 },
+    SkillTreeNode { id: "ro_subt_4", name: "Treasure Hunter", description: "+15% XP from exploration", icon: "🗺️", class: "rogue", tree: "Subtlety", tier: 4, requires: &["ro_subt_3"], bonus_type: "xp_mult", bonus_value: 15, skill_point_cost: 4 },
+    SkillTreeNode { id: "ro_subt_5", name: "Master Thief", description: "+15 LCK and +25% gold", icon: "👑", class: "rogue", tree: "Subtlety", tier: 5, requires: &["ro_subt_4"], bonus_type: "lck", bonus_value: 15, skill_point_cost: 5 },
 ];

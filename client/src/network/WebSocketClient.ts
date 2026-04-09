@@ -14,6 +14,16 @@ export enum MessageType {
   BankWithdraw = 10,
   AttackPlayer = 11,
   RequestChunk = 12,
+  AllocateStats = 13,
+  SelectClass = 14,
+  UseSkill = 15,
+  TradeAction = 18,
+  QuestAccept = 20,
+  QuestTurnIn = 21,
+  QuestListRequest = 22,
+  NpcInteract = 23,
+  SkillTreeUnlock = 24,
+  SkillTreeRequest = 25,
 
   // Server → Client
   AuthResult = 50,
@@ -32,6 +42,21 @@ export enum MessageType {
   GroundItems = 63,
   BankUpdate = 64,
   XpOrbPickup = 65,
+  EffectApplied = 66,
+  EffectRemoved = 67,
+  EffectTick = 68,
+  SkillResult = 69,
+  PartyUpdate = 70,
+  PartyInvite = 71,
+  TradeRequest = 72,
+  TradeUpdate = 73,
+  QuestUpdate = 80,
+  QuestList = 81,
+  AchievementUnlock = 82,
+  WorldBossSpawn = 83,
+  WorldBossDeath = 84,
+  NpcDialogue = 85,
+  SkillTreeData = 86,
 }
 
 export interface GameMessage {
@@ -78,7 +103,7 @@ export interface ChunkDataPayload {
   biome: string;
 }
 
-type MessageHandler = (msg: GameMessage) => void;
+export type MessageHandler = (msg: GameMessage) => void;
 
 export class WebSocketClient {
   private ws: WebSocket | null = null;
@@ -105,6 +130,13 @@ export class WebSocketClient {
 
   onStatusChange(listener: (status: 'connected' | 'disconnected' | 'reconnecting') => void): void {
     this.statusListeners.push(listener);
+  }
+
+  offStatusChange(listener: (status: 'connected' | 'disconnected' | 'reconnecting') => void): void {
+    const idx = this.statusListeners.indexOf(listener);
+    if (idx !== -1) {
+      this.statusListeners.splice(idx, 1);
+    }
   }
 
   private emitStatus(status: 'connected' | 'disconnected' | 'reconnecting'): void {

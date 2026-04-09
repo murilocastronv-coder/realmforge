@@ -1,41 +1,60 @@
 import Phaser from 'phaser';
-import { WebSocketClient, MessageType, EntityState, ChunkDataPayload } from '../network/WebSocketClient';
+import {
+  WebSocketClient,
+  MessageType,
+  EntityState,
+  ChunkDataPayload,
+  type MessageHandler,
+} from '../network/WebSocketClient';
 import { worldToScreen, screenToWorld, TILE_WIDTH, TILE_HEIGHT } from '../utils/IsoMath';
-import { CHUNK_SIZE, PLAYER_SPEED, GAME_WIDTH, GAME_HEIGHT } from '../utils/Constants';
-import { InventoryUI, GameItem } from '../ui/Inventory';
-import { EquipmentUI } from '../ui/Equipment';
-import { StatsUI, PlayerStats } from '../ui/Stats';
-import { BankUI } from '../ui/Bank';
-import { ChatBox } from '../ui/ChatBox';
-import { CraftingUI } from '../ui/Crafting';
-import { MarketplaceUI } from '../ui/Marketplace';
+import { CHUNK_SIZE, PLAYER_SPEED } from '../utils/Constants';
 import { HealthBars } from '../ui/HealthBars';
 import { Minimap } from '../world/Minimap';
-import { TutorialOverlay } from '../ui/Tutorial';
-
-const TILE_KEYS: Record<number, string> = {
-  0: 'tile_grass',
-  1: 'tile_water',
-  2: 'tile_sand',
-  3: 'tile_stone',
-  4: 'tile_snow',
-  5: 'tile_forest',
-  6: 'tile_swamp',
-  7: 'tile_town',
-};
-
-interface RemoteEntity {
-  sprite: Phaser.GameObjects.Sprite;
-  nameText: Phaser.GameObjects.Text;
-  targetX: number;
-  targetY: number;
-  entityType: string;
-  level?: number;
-  hp?: number;
-  maxHp?: number;
-  gridX: number;
-  gridY: number;
-}
+import type { GroundItemPayload } from '../types/gameData';
+import { ISOMETRIC_THEME, hexColor } from '../theme/isometricTheme';
+import { PLAYER_SPRITES } from '../theme/spriteMapping';
+import {
+  clearRenderedChunks as clearChunkTiles,
+  evictDistantChunks as evictRenderedChunks,
+  renderChunkData,
+  requestChunksAround as requestChunkWindow,
+} from './game/chunkRendering';
+import {
+  findEntityAtPosition,
+  interpolateRemoteEntities,
+  removeMissingRemoteEntities,
+  removeRemoteEntity,
+  type RemoteEntity,
+  upsertRemoteEntity,
+} from './game/entityRendering';
+import {
+  clearGroundItemViews,
+  findNearbyGroundItemId,
+  type GroundItemView,
+  updateGroundItemViews,
+  updatePickupPrompt,
+} from './game/groundItems';
+import { registerGameSceneNetworkHandlers } from './game/networkHandlers';
+import { GameSceneLifecycle } from './game/sceneLifecycle';
+import {
+  getTouchpointPromptBounds,
+  TownTouchpoints,
+} from './game/townTouchpoints';
+import {
+  playerStats,
+  playerCoords,
+  isDead,
+  addChatMessage,
+  togglePanel,
+  closeAllPanels,
+  openPanels,
+  showStatAllocation,
+  showTutorial,
+  showQuestPanel,
+  entityTooltip,
+  selectedTargetId,
+} from '../store/GameStore';
+import { InputGate } from '../services/InputGate';
 
 /**
  * GameScene — Main game world with isometric rendering,
@@ -62,46 +81,35 @@ export class GameScene extends Phaser.Scene {
   // Remote entities
   private entities: Map<string, RemoteEntity> = new Map();
 
-  // UI panels
-  private inventoryUI!: InventoryUI;
-  private equipmentUI!: EquipmentUI;
-  private statsUI!: StatsUI;
-  private bankUI!: BankUI;
-  private chatBox!: ChatBox;
-  private craftingUI!: CraftingUI;
-  private marketplaceUI!: MarketplaceUI;
+  // Core rendering (stays in Phaser)
   private healthBars!: HealthBars;
   private minimap!: Minimap;
-  private coordsText!: Phaser.GameObjects.Text;
   private moveSeq = 0;
 
   // Cursor tile highlight
   private cursorHighlight!: Phaser.GameObjects.Graphics;
 
-  // Player stats cache
-  private playerStats: PlayerStats = {
-    hp: 200, maxHp: 200,
-    mp: 80, maxMp: 80,
-    level: 1, xp: 0, xpNeeded: 100,
-    atk: 15, def: 10, spd: 12, lck: 5,
-  };
-
   // Combat targeting
-  private selectedEntityId: string | null = null;
+  private _selectedEntityId: string | null = null;
+  private get selectedEntityId() { return this._selectedEntityId; }
+  private set selectedEntityId(id: string | null) {
+    this._selectedEntityId = id;
+    selectedTargetId.value = id;
+  }
   private attackCooldown = 0;
-  private isDead = false;
-
-  // Death overlay
-  private deathOverlay!: Phaser.GameObjects.Rectangle;
-  private deathText!: Phaser.GameObjects.Text;
-  private respawnTimer = 0;
 
   // Ground items
-  private groundItems: Map<string, { sprite: Phaser.GameObjects.Sprite; text: Phaser.GameObjects.Text; gridX: number; gridY: number }> = new Map();
+  private groundItems: Map<string, GroundItemView> = new Map();
   private lastAutoPickupTime = 0;
+  private fountainHealTimer = 0;
 
-  // Tutorial overlay
-  private tutorial!: TutorialOverlay;
+  // Active status effects (visual tracking)
+  private activeEffects: Map<string, {
+    particle?: Phaser.GameObjects.Image;
+    tween?: Phaser.Tweens.Tween;
+    icon?: Phaser.GameObjects.Text;
+    tintOverlay?: Phaser.GameObjects.Rectangle;
+  }> = new Map();
 
   // WASD / Arrow key movement
   private keyW!: Phaser.Input.Keyboard.Key;
@@ -115,9 +123,20 @@ export class GameScene extends Phaser.Scene {
   private attackAura!: Phaser.GameObjects.Graphics;
   private pickupAura!: Phaser.GameObjects.Graphics;
 
-  // UI panel interactive overlays (scene-level rects that bypass Container hit-testing bug)
-  private uiOverlays: Phaser.GameObjects.Rectangle[] = [];
-  private uiClickedThisFrame = false;
+  private lifecycle = new GameSceneLifecycle();
+  private hasCleanedUp = false;
+  private townTouchpoints!: TownTouchpoints;
+  private hasShownCraftingLocationTip = false;
+
+  // Zoom
+  private targetZoom = 1.0;
+  private static readonly MIN_ZOOM = 0.5;
+  private static readonly MAX_ZOOM = 2.0;
+  private static readonly ZOOM_STEP = 0.1;
+
+  // Day/night cycle
+  private dayNightOverlay!: Phaser.GameObjects.Rectangle;
+  private static readonly DAY_CYCLE_MS = 600_000; // 10 min real-time = 1 game day
 
   constructor() {
     super({ key: 'GameScene' });
@@ -129,18 +148,47 @@ export class GameScene extends Phaser.Scene {
   }
 
   create(): void {
-    this.cameras.main.setBackgroundColor(0x111111);
+    this.hasCleanedUp = false;
+    this.lifecycle.reset();
+    this.chunkTiles.clear();
+    this.loadedChunks.clear();
+    this.entities.clear();
+    this.groundItems.clear();
+    this.playerGridX = 0;
+    this.playerGridY = 0;
+    this.targetGridX = 0;
+    this.targetGridY = 0;
+    this.lastChunkX = 0;
+    this.lastChunkY = 0;
+    this.moveSeq = 0;
+    this.selectedEntityId = null;
+    this.attackCooldown = 0;
+    this.lastAutoPickupTime = 0;
+    this.lastMoveSendTime = 0;
+    this.hasShownCraftingLocationTip = false;
+    this.activeEffects.forEach(eff => {
+      eff.particle?.destroy();
+      eff.tween?.destroy();
+      eff.icon?.destroy();
+      eff.tintOverlay?.destroy();
+    });
+    this.activeEffects.clear();
 
-    // Player sprite (48×54 texture, origin bottom-center)
+    this.cameras.main.setBackgroundColor(ISOMETRIC_THEME.palette.canvasAlt);
+
+    // Player sprite — use Kenney spritesheet (16px scaled 3x = 48px)
     const screenPos = worldToScreen(0, 0);
-    this.playerSprite = this.add.sprite(screenPos.x, screenPos.y - 27, 'player');
+    const playerClass = (playerStats.value.playerClass || 'default').toLowerCase();
+    const pSprite = PLAYER_SPRITES[playerClass] ?? PLAYER_SPRITES['default'];
+    this.playerSprite = this.add.sprite(screenPos.x, screenPos.y - 27, pSprite.sheet, pSprite.frame);
     this.playerSprite.setDepth(1000);
     this.playerSprite.setOrigin(0.5, 1);
+    this.playerSprite.setScale(3.0);
 
     const username = this.registry.get('username') as string || 'Player';
     this.playerNameText = this.add.text(screenPos.x, screenPos.y - 60, username, {
-      fontSize: '10px', color: '#ffffff',
-      stroke: '#000000', strokeThickness: 2,
+      fontSize: '12px', color: hexColor(ISOMETRIC_THEME.scenes.game.playerName),
+      stroke: hexColor(ISOMETRIC_THEME.palette.shadow), strokeThickness: 2,
     }).setOrigin(0.5).setDepth(1001);
 
     // Cursor highlight
@@ -148,141 +196,84 @@ export class GameScene extends Phaser.Scene {
     this.cursorHighlight.setDepth(999);
     this.drawCursorHighlight(0, 0);
 
-    // Camera (no zoom — UI elements use GAME_WIDTH×GAME_HEIGHT coordinate space directly)
+    // Camera
     this.cameras.main.startFollow(this.playerSprite, true, 0.1, 0.1);
 
-    // Death overlay (hidden initially)
-    this.deathOverlay = this.add.rectangle(GAME_WIDTH / 2, GAME_HEIGHT / 2, GAME_WIDTH + 200, GAME_HEIGHT + 200, 0x000000, 0.7)
-      .setScrollFactor(0).setDepth(9000).setVisible(false);
-    this.deathText = this.add.text(GAME_WIDTH / 2, GAME_HEIGHT / 2 - 20, '', {
-      fontSize: '20px', color: '#ff4444', fontStyle: 'bold',
-      stroke: '#000', strokeThickness: 3,
-    }).setScrollFactor(0).setDepth(9001).setOrigin(0.5).setVisible(false);
-
-    // --- Initialize all UI panels ---
-    this.coordsText = this.add.text(10, 10, 'Pos: 0, 0', {
-      fontSize: '11px', color: '#aaaaaa', stroke: '#000', strokeThickness: 2,
-    }).setScrollFactor(0).setDepth(2000);
-
-    // Stats HUD (top-left, below coords)
-    this.statsUI = new StatsUI(this, 10, 28);
-    this.statsUI.updateStats(this.playerStats);
-
     // Minimap (top-right)
-    this.minimap = new Minimap(this, GAME_WIDTH - 150, 10);
+    this.minimap = new Minimap(this, this.scale.width - 150, 10);
 
     // Health bars (floating over entities)
     this.healthBars = new HealthBars(this);
 
-    // Chat (bottom-left, above hints bar)
-    this.chatBox = new ChatBox(this, this.network, 10, GAME_HEIGHT - 244);
-
-    // Inventory (right side, toggled) — 356px wide
-    this.inventoryUI = new InventoryUI(this, GAME_WIDTH - 370, 60);
-    this.inventoryUI.setOnItemClick((item, index) => {
-      if (this.bankUI.isVisible()) {
-        // Bank is open — deposit item instead of equipping
-        this.network.send(MessageType.BankDeposit, { inventorySlot: index });
-      } else if (!item.slot) {
-        // No equipment slot — it's a consumable, use it
-        this.network.send(MessageType.UseItem, { action: 'use', slotIndex: index });
-      } else {
-        this.network.send(MessageType.EquipItem, { slotIndex: index });
-      }
-    });
-
-    // Equipment (left of inventory, toggled) — 165px wide
-    this.equipmentUI = new EquipmentUI(this, GAME_WIDTH - 550, 60);
-    this.equipmentUI.setOnUnequip((slotId) => {
-      this.network.send(MessageType.UnequipItem, { slot: slotId });
-    });
-
-    // Bank (centered, toggled) — ~393px wide
-    this.bankUI = new BankUI(this, Math.floor((GAME_WIDTH - 400) / 2), 100);
-    this.bankUI.setOnWithdraw((_item, index) => {
-      this.network.send(MessageType.BankWithdraw, { bankSlot: index });
-    });
-
-    // Crafting (centered, toggled) — 300px wide
-    this.craftingUI = new CraftingUI(this, Math.floor((GAME_WIDTH - 300) / 2), 100);
-    this.craftingUI.setOnCraft((recipe) => {
-      this.chatBox.addSystemMessage(`Crafting ${recipe.name}...`);
-      this.network.send(MessageType.UseItem, { action: 'craft', recipeId: recipe.id });
-    });
-
-    // Marketplace (centered, toggled) — 400px wide
-    this.marketplaceUI = new MarketplaceUI(this, Math.floor((GAME_WIDTH - 400) / 2), 80);
-    this.marketplaceUI.setOnBuy((listing) => {
-      this.chatBox.addSystemMessage(`Buying ${listing.item.name} for ${listing.price}g...`);
-      this.network.send(MessageType.UseItem, { action: 'buy', listingId: listing.id });
-    });
-
-    // --- UI Panel Interactive Overlays ---
-    // Scene-level invisible rects with setScrollFactor(0)+setInteractive() bypass
-    // the Phaser 3 bug where Container children lose correct hit testing when camera scrolls.
-    // These are NOT inside any Container — they are direct scene objects, same pattern as Tutorial.
-    this.createPanelOverlay(910, 60, 356, 254, this.inventoryUI);    // Inventory (8×5 grid)
-    this.createPanelOverlay(730, 60, 165, 280, this.equipmentUI);    // Equipment
-    this.createPanelOverlay(440, 100, 393, 345, this.bankUI);        // Bank (10×8 grid)
-    this.createPanelOverlay(490, 100, 300, 260, this.craftingUI);    // Crafting
-    this.createPanelOverlay(440, 80, 400, 300, this.marketplaceUI);  // Marketplace
+    this.townTouchpoints = new TownTouchpoints(this);
 
     // --- Input handling ---
-    this.input.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
-      // If a UI overlay already handled this click, consume and reset
-      if (this.uiClickedThisFrame) {
-        this.uiClickedThisFrame = false;
-        return;
-      }
-      if (pointer.rightButtonDown() || this.isDead || this.tutorial?.isActive()) return;
-
-      // Block clicks on non-interactive UI areas (chat, stats, minimap)
-      if (this.isPointerOverUI(pointer)) return;
-
-      const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
-      const gridPos = screenToWorld(worldPoint.x, worldPoint.y);
-      const tileX = Math.round(gridPos.x);
-      const tileY = Math.round(gridPos.y);
-
-      // Check if clicking on an entity (attack/interact)
-      const clickedEntity = this.findEntityAt(worldPoint.x, worldPoint.y);
-      if (clickedEntity) {
-        this.handleEntityClick(clickedEntity);
-        return;
-      }
-
-      // Clear auto-attack target when clicking to move
-      this.selectedEntityId = null;
-
-      // Move to clicked tile
-      this.targetGridX = tileX;
-      this.targetGridY = tileY;
-      this.moveSeq++;
-      this.network.send(MessageType.Move, {
-        targetX: tileX, targetY: tileY, seq: this.moveSeq,
-      });
+    this.input.on('pointerdown', this.handlePointerDown, this);
+    this.input.on('pointermove', this.handlePointerMove, this);
+    this.input.on('wheel', this.handleMouseWheel, this);
+    this.lifecycle.onCleanup(() => {
+      this.input.off('pointerdown', this.handlePointerDown, this);
+      this.input.off('pointermove', this.handlePointerMove, this);
+      this.input.off('wheel', this.handleMouseWheel, this);
     });
 
-    this.input.on('pointermove', (pointer: Phaser.Input.Pointer) => {
-      if (this.isPointerOverUI(pointer)) {
-        this.cursorHighlight.clear();
+    // Connect InputGate to Phaser keyboard
+    InputGate.setPhaserKeyboard(this.input.keyboard!);
+
+    // Keyboard shortcuts — InputGate auto-disables Phaser keyboard when HTML has focus
+    this.registerKeyboardShortcut('keydown-I', () => togglePanel('inventory'));
+    this.registerKeyboardShortcut('keydown-E', () => togglePanel('equipment'));
+    this.registerKeyboardShortcut('keydown-B', () => {
+      if (openPanels.value.has('bank')) { togglePanel('bank'); return; }
+      if (!this.canUseBank()) {
+        addChatMessage('system', 'System', '🏦 Return to the banker in town center to use the bank.');
         return;
       }
-      const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
-      const gridPos = screenToWorld(worldPoint.x, worldPoint.y);
-      this.drawCursorHighlight(Math.round(gridPos.x), Math.round(gridPos.y));
+      togglePanel('bank');
     });
-
-    // Keyboard shortcuts (only when chat not focused)
-    const keys = this.input.keyboard!;
-    keys.on('keydown-I', () => { if (!this.chatBox.isFocused()) this.inventoryUI.toggle(); });
-    keys.on('keydown-E', () => { if (!this.chatBox.isFocused()) this.equipmentUI.toggle(); });
-    keys.on('keydown-B', () => { if (!this.chatBox.isFocused()) this.bankUI.toggle(); });
-    keys.on('keydown-C', () => { if (!this.chatBox.isFocused()) this.craftingUI.toggle(); });
-    keys.on('keydown-M', () => { if (!this.chatBox.isFocused()) this.marketplaceUI.toggle(); });
-    keys.on('keydown-ESC', () => this.closeAllPanels());
+    this.registerKeyboardShortcut('keydown-C', () => {
+      const opening = !openPanels.value.has('crafting');
+      togglePanel('crafting');
+      if (opening && !this.hasShownCraftingLocationTip
+          && !this.townTouchpoints.isNearCraftingStation(this.playerGridX, this.playerGridY)) {
+        this.hasShownCraftingLocationTip = true;
+        addChatMessage('system', 'System', '⚒️ Forgekeeper Oren works the town forge just east of the square.');
+      }
+    });
+    this.registerKeyboardShortcut('keydown-M', () => {
+      if (openPanels.value.has('marketplace')) { togglePanel('marketplace'); return; }
+      const dx = this.playerGridX - 0;
+      const dy = this.playerGridY - (-7);
+      if (Math.sqrt(dx * dx + dy * dy) > 10) {
+        addChatMessage('system', 'System', '🛒 Visit Merchant Kael near the market stalls to trade.');
+        return;
+      }
+      togglePanel('marketplace');
+    });
+    this.registerKeyboardShortcut('keydown-P', () => {
+      if (playerStats.value.statPoints > 0) {
+        showStatAllocation.value = !showStatAllocation.value;
+      }
+    });
+    this.registerKeyboardShortcut('keydown-Q', () => {
+      showQuestPanel.value = !showQuestPanel.value;
+    });
+    this.registerKeyboardShortcut('keydown-N', () => togglePanel('character'));
+    this.registerKeyboardShortcut('keydown-O', () => togglePanel('settings'));
+    this.registerKeyboardShortcut('keydown-Y', () => togglePanel('achievements'));
+    this.registerKeyboardShortcut('keydown-L', () => togglePanel('combatlog'));
+    this.registerKeyboardShortcut('keydown-G', () => togglePanel('social'));
+    this.registerKeyboardShortcut('keydown-TAB', () => togglePanel('worldmap'));
+    this.registerKeyboardShortcut('keydown-K', () => togglePanel('skilltree'));
+    this.registerKeyboardShortcut('keydown-J', () => togglePanel('leaderboard'));
+    this.registerKeyboardShortcut('keydown-ESC', () => {
+      closeAllPanels();
+      showStatAllocation.value = false;
+      showQuestPanel.value = false;
+    });
 
     // WASD + Arrow key references for movement polling
+    const keys = this.input.keyboard!;
     this.keyW = keys.addKey(Phaser.Input.Keyboard.KeyCodes.W, false);
     this.keyA = keys.addKey(Phaser.Input.Keyboard.KeyCodes.A, false);
     this.keyS = keys.addKey(Phaser.Input.Keyboard.KeyCodes.S, false);
@@ -293,61 +284,207 @@ export class GameScene extends Phaser.Scene {
     this.attackAura = this.add.graphics().setDepth(998);
     this.pickupAura = this.add.graphics().setDepth(997);
 
-    // Keyboard hints HUD bar (bottom of screen)
-    const hintsText = '  WASD/Arrows: Move  |  I: Inventory  |  E: Equipment  |  B: Bank  |  C: Craft  |  M: Market  |  ENTER: Chat  |  ESC: Close  ';
-    const hintsBg = this.add.rectangle(GAME_WIDTH / 2, GAME_HEIGHT - 12, GAME_WIDTH, 24, 0x000000, 0.6)
-      .setScrollFactor(0).setDepth(2500).setOrigin(0.5, 0.5);
-    const hintsLabel = this.add.text(GAME_WIDTH / 2, GAME_HEIGHT - 12, hintsText, {
-      fontSize: '11px', color: '#99aabb', fontStyle: 'bold',
-    }).setScrollFactor(0).setDepth(2501).setOrigin(0.5, 0.5);
-
     // Network handlers
     this.setupNetworkHandlers();
 
-    // Generate initial chunks — server sends initial 5×5 on auth,
-    // and requestChunksAround handles requesting any missing
+    // Generate initial chunks
     this.requestChunksAround(0, 0);
 
-    // Welcome messages
-    this.chatBox.addSystemMessage('Welcome to RealmForge! Use WASD/Arrows or click to move. Auto-attack nearby enemies!');
-    this.chatBox.addSystemMessage('Keys: I=Inventory E=Equipment B=Bank C=Craft M=Market');
-    this.chatBox.addSystemMessage('Click enemies to attack. ENTER to chat. /tutorial to replay guide.');
+    // Welcome messages via GameStore
+    addChatMessage('system', 'System', 'Welcome to RealmForge! Use WASD/Arrows or click to move. Auto-attack nearby enemies!');
+    addChatMessage('system', 'System', 'Town is a safe zone — enemies will flee when approaching! Heal at the fountain.');
+    addChatMessage('system', 'System', 'Keys: I=Inventory E=Equipment B=Bank C=Craft M=Market P=Stats');
 
-    // Tutorial overlay (shows once for new players — keyed by username, not playerId UUID)
+    // Tutorial — show once for new players
     const tutorialKey = this.registry.get('username') as string || this.playerId;
-    this.tutorial = new TutorialOverlay(this, tutorialKey);
-    this.tutorial.startIfNew();
+    if (!localStorage.getItem(`tutorial_done_${tutorialKey}`)) {
+      showTutorial.value = true;
+    }
 
-    // Register /tutorial chat command
-    this.chatBox.registerCommand('/tutorial', () => {
-      this.tutorial.start();
-    });
-
-    // Connection status overlay
+    // Connection status overlay (simplified — just Phaser text)
     this.setupConnectionOverlay();
+
+    // Day/night cycle overlay
+    this.dayNightOverlay = this.add.rectangle(
+      this.scale.width / 2, this.scale.height / 2,
+      this.scale.width, this.scale.height,
+      0x001133, 0,
+    ).setScrollFactor(0).setDepth(8000).setBlendMode(Phaser.BlendModes.MULTIPLY);
+
+    // Handle viewport resize — reposition minimap + touchpoints + day/night overlay
+    const handleResize = (gameSize: Phaser.Structs.Size) => {
+      this.minimap.reposition(gameSize.width - 150, 10);
+      this.townTouchpoints.repositionPrompt(gameSize.width);
+      this.dayNightOverlay.setPosition(gameSize.width / 2, gameSize.height / 2);
+      this.dayNightOverlay.setSize(gameSize.width, gameSize.height);
+    };
+    this.scale.on('resize', handleResize);
+    this.lifecycle.onCleanup(() => this.scale.off('resize', handleResize));
+    // Run once immediately with current size
+    handleResize(this.scale.gameSize);
+
+    this.events.once(Phaser.Scenes.Events.SHUTDOWN, this.cleanupScene, this);
+    this.events.once(Phaser.Scenes.Events.DESTROY, this.cleanupScene, this);
+  }
+
+  private handlePointerDown(pointer: Phaser.Input.Pointer): void {
+    if (pointer.rightButtonDown() || isDead.value) return;
+    if (!InputGate.shouldGameProcessClick()) return;
+    if (this.isPointerOverUI(pointer)) return;
+
+    const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
+    const gridPos = screenToWorld(worldPoint.x, worldPoint.y);
+    const tileX = Math.round(gridPos.x);
+    const tileY = Math.round(gridPos.y);
+
+    const clickedEntity = this.findEntityAt(worldPoint.x, worldPoint.y);
+    if (clickedEntity) {
+      this.handleEntityClick(clickedEntity);
+      return;
+    }
+
+    this.selectedEntityId = null;
+    this.targetGridX = tileX;
+    this.targetGridY = tileY;
+    this.moveSeq++;
+    this.network.send(MessageType.Move, {
+      targetX: tileX, targetY: tileY, seq: this.moveSeq,
+    });
+  }
+
+  private handlePointerMove(pointer: Phaser.Input.Pointer): void {
+    if (this.isPointerOverUI(pointer)) {
+      this.cursorHighlight.clear();
+      entityTooltip.value = null;
+      return;
+    }
+    const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
+    const gridPos = screenToWorld(worldPoint.x, worldPoint.y);
+    this.drawCursorHighlight(Math.round(gridPos.x), Math.round(gridPos.y));
+
+    // Entity tooltip on hover — find closest entity within range
+    let closestEntity: { name: string; level?: number; hp?: number; maxHp?: number; type: string } | null = null;
+    let closestDist = 1.5;
+    for (const [, entity] of this.entities) {
+      const dx = entity.gridX - gridPos.x;
+      const dy = entity.gridY - gridPos.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist < closestDist) {
+        closestDist = dist;
+        closestEntity = {
+          name: entity.nameText.text || entity.entityType,
+          level: entity.level,
+          hp: entity.hp,
+          maxHp: entity.maxHp,
+          type: entity.entityType,
+        };
+      }
+    }
+
+    if (closestEntity) {
+      entityTooltip.value = {
+        name: closestEntity.name,
+        level: closestEntity.level,
+        hp: closestEntity.hp,
+        maxHp: closestEntity.maxHp,
+        type: closestEntity.type as 'enemy' | 'player' | 'npc',
+        screenX: pointer.x,
+        screenY: pointer.y,
+      };
+      // Cursor feedback
+      this.input.setDefaultCursor(
+        closestEntity.type === 'enemy' ? 'crosshair'
+        : closestEntity.type === 'npc' ? 'pointer'
+        : 'default',
+      );
+    } else {
+      entityTooltip.value = null;
+      this.input.setDefaultCursor('default');
+    }
+  }
+
+  private handleMouseWheel(
+    _pointer: Phaser.Input.Pointer,
+    _gameObjects: Phaser.GameObjects.GameObject[],
+    _dx: number,
+    dy: number,
+  ): void {
+    // Don't zoom when pointer is over interactive UI (panels with scrollable content)
+    if (!InputGate.shouldGameProcessClick()) return;
+
+    const direction = dy > 0 ? -1 : 1; // scroll down = zoom out, up = zoom in
+    this.targetZoom = Phaser.Math.Clamp(
+      this.targetZoom + direction * GameScene.ZOOM_STEP,
+      GameScene.MIN_ZOOM,
+      GameScene.MAX_ZOOM,
+    );
+
+    // Zoom changes viewport coverage — re-request chunks at wider radius
+    const zoomRadius = Math.ceil(2 / this.targetZoom);
+    this.requestChunksAround(this.lastChunkX, this.lastChunkY, zoomRadius);
+  }
+
+  private registerKeyboardShortcut(eventName: string, handler: () => void): void {
+    this.lifecycle.registerKeyboardShortcut(this.input.keyboard, eventName, handler);
+  }
+
+  private registerNetworkHandler(type: MessageType, handler: MessageHandler): void {
+    this.lifecycle.registerNetworkHandler(this.network, type, handler);
+  }
+
+  private cleanupScene(): void {
+    if (this.hasCleanedUp) return;
+    this.hasCleanedUp = true;
+
+    this.lifecycle.cleanup();
+
+    for (const id of Array.from(this.entities.keys())) {
+      this.removeEntity(id);
+    }
+    this.entities.clear();
+
+    this.clearGroundItems();
+    clearChunkTiles(this.chunkTiles, this.loadedChunks);
+
+    this.townTouchpoints?.destroy();
+    this.healthBars?.destroy();
+    this.minimap?.destroy();
+
+    this.attackAura?.destroy();
+    this.pickupAura?.destroy();
+    this.cursorHighlight?.destroy();
   }
 
   update(_time: number, delta: number): void {
-    // Sync UI overlay interactivity with panel visibility
-    for (const overlay of this.uiOverlays) {
-      const panel = (overlay as any).__panel as { isVisible(): boolean };
-      if (overlay.input) overlay.input.enabled = panel.isVisible();
-    }
-
     // Constant-speed movement: tiles per millisecond
     const moveStep = PLAYER_SPEED * (delta / 1000);
     // Remote entity interpolation uses proportional lerp (smoother for network entities)
     const remoteLerp = Math.min(0.15 * (delta / 16.67), 1.0);
 
-    // Death timer countdown
-    if (this.isDead) {
-      this.respawnTimer -= delta / 1000;
-      const secs = Math.max(0, Math.ceil(this.respawnTimer));
-      this.deathText.setText(`💀 YOU DIED\nRespawning in ${secs}s...`);
+    // --- Smooth zoom interpolation (south-pivot via follow offset) ---
+    const cam = this.cameras.main;
+    const zoomDiff = this.targetZoom - cam.zoom;
+    if (Math.abs(zoomDiff) > 0.001) {
+      const zoomLerp = Math.min(8 * (delta / 1000), 1.0);
+      cam.zoom += zoomDiff * zoomLerp;
+
+      // South-pivot: shift camera follow offset upward so the bottom of
+      // the viewport stays anchored. At zoom 1 offset is 0; zooming in
+      // pushes the view down (south), zooming out pulls it up.
+      // Formula: offset = (viewportH / 2) * (1 - 1/zoom) in world pixels.
+      const offsetY = (cam.height / 2) * (1 - 1 / cam.zoom);
+      cam.setFollowOffset(0, -offsetY);
+    }
+
+    // --- Player size growth by level (3x base, grows to ~4.2x at lv50+) ---
+    const lvl = playerStats.value.level || 1;
+    const playerScale = 3.0 * (1.0 + Math.min(lvl - 1, 50) * 0.008);
+    if (Math.abs(this.playerSprite.scaleX - playerScale) > 0.001) {
+      this.playerSprite.setScale(playerScale);
     }
 
     // --- WASD / Arrow key movement ---
-    if (!this.isDead && !this.chatBox.isFocused()) {
+    if (!isDead.value) {
       let dx = 0;
       let dy = 0;
       if (this.keyW.isDown || this.cursors.up.isDown) dy -= 1;
@@ -390,8 +527,7 @@ export class GameScene extends Phaser.Scene {
           this.playerGridY = this.targetGridY;
         }
       }
-    } else if (!this.isDead) {
-      // Chat focused or not moving — still interpolate toward target at constant speed
+    } else if (!isDead.value) {
       const toTargetX = this.targetGridX - this.playerGridX;
       const toTargetY = this.targetGridY - this.playerGridY;
       const distToTarget = Math.sqrt(toTargetX * toTargetX + toTargetY * toTargetY);
@@ -402,51 +538,74 @@ export class GameScene extends Phaser.Scene {
       }
     }
 
-    // Update player sprite position
+    // Update player sprite position with walking bob
     const screenPos = worldToScreen(this.playerGridX, this.playerGridY);
-    this.playerSprite.setPosition(screenPos.x, screenPos.y - 27);
+    const pdx = Math.abs(this.playerGridX - this.targetGridX);
+    const pdy = Math.abs(this.playerGridY - this.targetGridY);
+    const playerMoving = pdx > 0.05 || pdy > 0.05;
+    const bobOffset = playerMoving ? Math.sin(Date.now() * 0.01) * 2 : 0;
+    this.playerSprite.setPosition(screenPos.x, screenPos.y - 27 + bobOffset);
     this.playerNameText.setPosition(screenPos.x, screenPos.y - 60);
+    // Flip player sprite based on movement direction
+    if (this.targetGridX < this.playerGridX - 0.1) {
+      this.playerSprite.setFlipX(true);
+    } else if (this.targetGridX > this.playerGridX + 0.1) {
+      this.playerSprite.setFlipX(false);
+    }
     this.playerSprite.setDepth(screenPos.y + 1000);
     this.playerNameText.setDepth(screenPos.y + 1001);
+    this.townTouchpoints.update(this.playerGridX, this.playerGridY);
+
+    // Fountain healing: passively regen HP when near the fountain
+    if (!isDead.value && this.townTouchpoints.isNearFountain(this.playerGridX, this.playerGridY)) {
+      this.fountainHealTimer += delta;
+      if (this.fountainHealTimer >= 1500) { // heal every 1.5 seconds
+        this.fountainHealTimer = 0;
+        const stats = playerStats.value;
+        if (stats.hp < stats.maxHp) {
+          const healAmount = Math.min(
+            Math.ceil(stats.maxHp * 0.08), // 8% max HP per tick
+            stats.maxHp - stats.hp
+          );
+          playerStats.value = { ...stats, hp: stats.hp + healAmount };
+
+          // Visual feedback — green float text
+          const pos = worldToScreen(this.playerGridX, this.playerGridY);
+          const healText = this.add.text(pos.x + 15, pos.y - 45, `+${healAmount}`, {
+            fontSize: '13px', fontFamily: 'monospace', fontStyle: 'bold',
+            color: hexColor(ISOMETRIC_THEME.ui.bars.healthHigh),
+            stroke: hexColor(ISOMETRIC_THEME.palette.shadow), strokeThickness: 3,
+          }).setOrigin(0.5).setDepth(9000);
+          this.tweens.add({
+            targets: healText, y: pos.y - 80, alpha: 0,
+            duration: 1000, ease: 'Power2', onComplete: () => healText.destroy(),
+          });
+        }
+      }
+    } else {
+      this.fountainHealTimer = 0;
+    }
 
     // Draw player auras
     this.drawPlayerAuras(screenPos.x, screenPos.y);
 
-    // Coords display
-    this.coordsText.setText(
-      `Pos: ${Math.round(this.playerGridX)}, ${Math.round(this.playerGridY)}`
-    );
+    // Update coords in GameStore for StatsBar
+    playerCoords.value = { x: Math.round(this.playerGridX), y: Math.round(this.playerGridY) };
 
     // Interpolate remote entities + update health bars
-    const minimapEntities: Array<{ x: number; y: number; type: string }> = [];
-
-    this.entities.forEach((entity, id) => {
-      const ex = Phaser.Math.Linear(entity.sprite.x, entity.targetX, remoteLerp);
-      const ey = Phaser.Math.Linear(entity.sprite.y, entity.targetY, remoteLerp);
-      entity.sprite.setPosition(ex, ey);
-      entity.nameText.setPosition(ex, ey - 38);
-
-      const depthBase = entity.entityType === 'player' ? 900 : 500;
-      entity.sprite.setDepth(ey + depthBase);
-      entity.nameText.setDepth(ey + depthBase + 1);
-
-      // Update floating health bars for enemies
-      if (entity.hp !== undefined && entity.maxHp !== undefined && entity.entityType === 'enemy') {
-        this.healthBars.update(id, ex, ey - 42, entity.hp, entity.maxHp, ey + depthBase + 2);
-      }
-
-      // Collect for minimap
-      minimapEntities.push({ x: entity.gridX, y: entity.gridY, type: entity.entityType });
-    });
+    const minimapEntities = interpolateRemoteEntities(this.entities, remoteLerp, this.healthBars);
 
     // Update minimap
     this.minimap.update(this.playerGridX, this.playerGridY, minimapEntities);
+
+    // Update pickup prompt for nearby ground items
+    updatePickupPrompt(this, this.groundItems, this.playerGridX, this.playerGridY, 1.8);
 
     // Attack cooldown
     if (this.attackCooldown > 0) this.attackCooldown -= delta;
 
     // Auto-attack: if no target selected, find nearest enemy in range
-    if (!this.selectedEntityId && this.attackCooldown <= 0 && !this.isDead) {
+    if (!this.selectedEntityId && this.attackCooldown <= 0 && !isDead.value) {
       let nearestId: string | null = null;
       let nearestDist = 2.5; // attack range (server uses 3.0, slightly less for latency margin)
       this.entities.forEach((entity, id) => {
@@ -467,7 +626,7 @@ export class GameScene extends Phaser.Scene {
     }
 
     // Auto-attack selected target (skip while dead)
-    if (this.selectedEntityId && this.attackCooldown <= 0 && !this.isDead) {
+    if (this.selectedEntityId && this.attackCooldown <= 0 && !isDead.value) {
       const target = this.entities.get(this.selectedEntityId);
       if (target) {
         if (target.hp !== undefined && target.hp <= 0) {
@@ -495,17 +654,27 @@ export class GameScene extends Phaser.Scene {
     }
 
     // Auto-pickup ground items when walking near them (throttled to 5/sec)
-    if (!this.isDead && _time - this.lastAutoPickupTime > 200) {
+    if (!isDead.value && _time - this.lastAutoPickupTime > 200) {
       this.lastAutoPickupTime = _time;
-      for (const [id, gItem] of this.groundItems) {
-        const dx = this.playerGridX - gItem.gridX;
-        const dy = this.playerGridY - gItem.gridY;
-        const dist = Math.sqrt(dx * dx + dy * dy);
-        if (dist < 1.8) {
-          this.network.send(MessageType.PickupItem, { itemId: id });
-          break; // one per tick to avoid spam
-        }
+      const nearbyItemId = findNearbyGroundItemId(this.groundItems, this.playerGridX, this.playerGridY, 1.8);
+      if (nearbyItemId) {
+        this.network.send(MessageType.PickupItem, { itemId: nearbyItemId });
       }
+    }
+
+    // Day/night cycle (sinusoidal: 0=midnight, 0.5=noon)
+    const dayProgress = (_time % GameScene.DAY_CYCLE_MS) / GameScene.DAY_CYCLE_MS;
+    const sunAngle = dayProgress * Math.PI * 2;
+    // Night intensity: 0 at noon, peaks at midnight
+    const nightAlpha = Math.max(0, -Math.cos(sunAngle)) * 0.35;
+    // Dawn/dusk warm tint
+    const isTransition = Math.abs(Math.sin(sunAngle)) > 0.85 && nightAlpha < 0.1;
+    if (isTransition) {
+      this.dayNightOverlay.fillColor = 0x331100; // warm orange tint
+      this.dayNightOverlay.fillAlpha = 0.08;
+    } else {
+      this.dayNightOverlay.fillColor = 0x001133; // cool blue night
+      this.dayNightOverlay.fillAlpha = nightAlpha;
     }
 
     // Chunk loading
@@ -521,407 +690,96 @@ export class GameScene extends Phaser.Scene {
 
   // --- Network Handlers ---
   private setupNetworkHandlers(): void {
-    // Handle re-authentication (reconnect) — update playerId
-    this.network.on(MessageType.AuthResult, (msg) => {
-      try {
-        const payload = msg.payload as { success: boolean; playerId?: string };
-        if (payload.success && payload.playerId && payload.playerId !== this.playerId) {
-          const oldId = this.playerId;
-          this.playerId = payload.playerId;
-          this.registry.set('playerId', payload.playerId);
-          // Clean up old entity sprite if it exists
-          const oldEntity = this.entities.get(oldId);
-          if (oldEntity) {
-            oldEntity.sprite.destroy();
-            oldEntity.nameText.destroy();
-            this.entities.delete(oldId);
-          }
-          this.chatBox.addSystemMessage('Reconnected successfully.');
-        }
-      } catch (e) {
-        console.error('[GameScene] AuthResult reconnect error:', e);
-      }
+    registerGameSceneNetworkHandlers({
+      register: this.registerNetworkHandler.bind(this),
+      registry: this.registry,
+      player: {
+        getId: () => this.playerId,
+        setId: (id) => { this.playerId = id; },
+        sprite: this.playerSprite,
+        getPosition: () => ({ x: this.playerGridX, y: this.playerGridY }),
+        setPosition: (update) => this.applyPlayerPosition(update),
+        setSelectedEntityId: (id) => { this.selectedEntityId = id; },
+        movementInputActive: () => this.isMovementInputActive(),
+      },
+      world: {
+        entities: this.entities,
+        updateRemoteEntity: (entity) => this.updateRemoteEntity(entity),
+        removeEntity: (id) => this.removeEntity(id),
+        removeMissingEntities: (seenIds) => this.removeMissingEntities(seenIds),
+        renderChunk: (chunk) => this.renderChunk(chunk),
+        updateGroundItems: (items) => this.updateGroundItems(items),
+        clearGroundItems: () => this.clearGroundItems(),
+      },
+      effects: {
+        showLevelUpEffect: () => this.showLevelUpEffect(),
+        showDamageNumber: (x, y, damage, isCrit) => this.showDamageNumber(x, y, damage, isCrit),
+        showMissText: (x, y) => this.showMissText(x, y),
+        showDeathEffect: (x, y) => this.showDeathEffect(x, y),
+        showXpOrbPickup: (x, y, xp) => this.showXpOrbPickup(x, y, xp),
+        showEffectApplied: (effectType) => this.showEffectApplied(effectType),
+        showEffectRemoved: (effectType) => this.showEffectRemoved(effectType),
+        showEffectTick: (effectType, value) => this.showEffectTick(effectType, value),
+        shakeCamera: (intensity, duration) => this.shakeCamera(intensity, duration),
+        showHealNumber: (x, y, amount) => this.showHealNumber(x, y, amount),
+      },
     });
-
-    this.network.on(MessageType.EntityUpdate, (msg) => {
-      try {
-        const payload = msg.payload as { entities: EntityState[] };
-        const seenIds = new Set<string>();
-
-        for (const entity of payload.entities) {
-          seenIds.add(entity.id);
-          if (entity.id === this.playerId) {
-            // Check if WASD keys are currently held — if so, client owns movement
-            const wasdActive = !this.chatBox.isFocused() && (
-              this.keyW.isDown || this.keyS.isDown || this.keyA.isDown || this.keyD.isDown ||
-              this.cursors.up.isDown || this.cursors.down.isDown ||
-              this.cursors.left.isDown || this.cursors.right.isDown
-            );
-
-            // Only accept server target if WASD is NOT active (click-to-move mode)
-            if (!wasdActive && entity.targetX !== undefined && entity.targetY !== undefined) {
-              this.targetGridX = entity.targetX;
-              this.targetGridY = entity.targetY;
-            }
-
-            // Server position correction — only for large desync (>5 tiles = hard snap)
-            // Moderate drift is expected since client predicts movement
-            const drift = Math.sqrt(
-              Math.pow(this.playerGridX - entity.x, 2) +
-              Math.pow(this.playerGridY - entity.y, 2)
-            );
-            if (drift > 5.0) {
-              // Extreme desync — hard snap
-              this.playerGridX = entity.x;
-              this.playerGridY = entity.y;
-              this.targetGridX = entity.targetX ?? entity.x;
-              this.targetGridY = entity.targetY ?? entity.y;
-            } else if (drift > 2.0) {
-              // Significant drift — gentle correction (5% pull)
-              this.playerGridX = Phaser.Math.Linear(this.playerGridX, entity.x, 0.05);
-              this.playerGridY = Phaser.Math.Linear(this.playerGridY, entity.y, 0.05);
-            }
-            // drift < 2.0: no correction — trust client prediction
-
-            if (entity.hp !== undefined) {
-              this.playerStats.hp = entity.hp;
-              this.playerStats.maxHp = entity.maxHp || 100;
-              this.statsUI.updateStats(this.playerStats);
-            }
-            continue;
-          }
-          this.updateRemoteEntity(entity);
-        }
-
-        // Remove entities no longer visible from server
-        for (const [id] of this.entities) {
-          if (!seenIds.has(id)) {
-            this.removeEntity(id);
-          }
-        }
-      } catch (e) {
-        console.error('[GameScene] EntityUpdate error:', e);
-      }
-    });
-
-    this.network.on(MessageType.PlayerJoined, (msg) => {
-      try {
-        const { id, username } = msg.payload as { id: string; username: string };
-        if (id !== this.playerId) {
-          this.chatBox.addMessage('System', `${username} joined the world.`, 'system');
-        }
-      } catch (e) {
-        console.error('[GameScene] PlayerJoined error:', e);
-      }
-    });
-
-    this.network.on(MessageType.PlayerLeft, (msg) => {
-      try {
-        const { id } = msg.payload as { id: string };
-        this.removeEntity(id);
-      } catch (e) {
-        console.error('[GameScene] PlayerLeft error:', e);
-      }
-    });
-
-    this.network.on(MessageType.ChunkData, (msg) => {
-      try {
-        this.renderChunk(msg.payload as ChunkDataPayload);
-      } catch (e) {
-        console.error('[GameScene] ChunkData error:', e);
-      }
-    });
-
-    this.network.on(MessageType.StatsUpdate, (msg) => {
-      try {
-        const stats = msg.payload as Partial<PlayerStats>;
-        Object.assign(this.playerStats, stats);
-        this.statsUI.updateStats(this.playerStats);
-      } catch (e) {
-        console.error('[GameScene] StatsUpdate error:', e);
-      }
-    });
-
-    this.network.on(MessageType.LevelUp, (msg) => {
-      try {
-        const { level } = msg.payload as { level: number };
-        this.playerStats.level = level;
-        this.statsUI.updateStats(this.playerStats);
-        this.chatBox.addMessage('System', `⭐ Level Up! You are now level ${level}!`, 'system');
-        this.showLevelUpEffect();
-      } catch (e) {
-        console.error('[GameScene] LevelUp error:', e);
-      }
-    });
-
-    this.network.on(MessageType.CombatEvent, (msg) => {
-      try {
-        const { attackerId, targetId, damage, isCrit } = msg.payload as {
-          attackerId: string; targetId: string; damage: number; isCrit: boolean;
-        };
-        const target = this.entities.get(targetId);
-        if (target) {
-          this.showDamageNumber(target.sprite.x, target.sprite.y - 20, damage, isCrit);
-          if (target.hp !== undefined) {
-            target.hp = Math.max(0, target.hp - damage);
-          }
-        }
-        if (targetId === this.playerId) {
-          this.showDamageNumber(this.playerSprite.x, this.playerSprite.y - 55, damage, isCrit);
-        }
-      } catch (e) {
-        console.error('[GameScene] CombatEvent error:', e);
-      }
-    });
-
-    this.network.on(MessageType.Death, (msg) => {
-      try {
-        const { killedBy } = (msg.payload || {}) as { killedBy?: string };
-        this.isDead = true;
-        this.respawnTimer = 5;
-        this.selectedEntityId = null;
-        this.deathOverlay.setVisible(true);
-        this.deathText.setVisible(true);
-        this.deathText.setText('💀 YOU DIED\nRespawning in 5s...');
-        this.showDeathEffect(this.playerSprite.x, this.playerSprite.y);
-        const deathMsg = killedBy
-          ? `💀 Killed by ${killedBy}! Respawning at town...`
-          : '💀 You died! Respawning at town...';
-        this.chatBox.addMessage('System', deathMsg, 'combat');
-      } catch (e) {
-        console.error('[GameScene] Death error:', e);
-      }
-    });
-
-    this.network.on(MessageType.ItemDrop, (msg) => {
-      try {
-        const { itemName, rarity } = msg.payload as { itemName: string; rarity: number };
-        const rarityNames = ['Common', 'Uncommon', 'Rare', 'Epic', 'Legendary', 'Mythic'];
-        this.chatBox.addMessage('Loot', `Picked up ${rarityNames[rarity] || ''} ${itemName}`, 'system');
-      } catch (e) {
-        console.error('[GameScene] ItemDrop error:', e);
-      }
-    });
-
-    this.network.on(MessageType.InventoryUpdate, (msg) => {
-      try {
-        const payload = msg.payload as {
-          items: GameItem[];
-          equipment?: Array<{ slot: string; item: GameItem }>;
-          gold?: number;
-        };
-        // Sync inventory grid — place items at their correct slotIndex
-        const paddedItems: (GameItem | null)[] = new Array(40).fill(null);
-        for (const item of payload.items) {
-          const idx = (item as any).slotIndex;
-          if (typeof idx === 'number' && idx >= 0 && idx < 40) {
-            paddedItems[idx] = item;
-          }
-        }
-        this.inventoryUI.setItems(paddedItems);
-        // Sync equipment
-        if (payload.equipment) {
-          this.equipmentUI.setAllEquipment(payload.equipment);
-        }
-        // Sync gold
-        if (payload.gold !== undefined) {
-          this.inventoryUI.setGold(payload.gold);
-        }
-      } catch (e) {
-        console.error('[GameScene] InventoryUpdate error:', e);
-      }
-    });
-
-    this.network.on(MessageType.Respawn, (msg) => {
-      try {
-        const { x, y } = msg.payload as { x: number; y: number };
-        this.targetGridX = x;
-        this.targetGridY = y;
-        this.playerGridX = x;
-        this.playerGridY = y;
-        this.isDead = false;
-        this.deathOverlay.setVisible(false);
-        this.deathText.setVisible(false);
-        this.chatBox.addSystemMessage('✅ You have respawned at town.');
-      } catch (e) {
-        console.error('[GameScene] Respawn error:', e);
-      }
-    });
-
-    // Ground items nearby
-    this.network.on(MessageType.GroundItems, (msg) => {
-      try {
-        const { items } = msg.payload as { items: Array<{ id: string; name: string; rarity: number; x: number; y: number }> };
-        this.updateGroundItems(items);
-      } catch (e) {
-        console.error('[GameScene] GroundItems error:', e);
-      }
-    });
-
-    // Bank contents update
-    this.network.on(MessageType.BankUpdate, (msg) => {
-      try {
-        const { items } = msg.payload as { items: GameItem[] };
-        this.bankUI.setItems(items);
-      } catch (e) {
-        console.error('[GameScene] BankUpdate error:', e);
-      }
-    });
-
-    // XP Orb pickup — floating "+XP" text
-    this.network.on(MessageType.XpOrbPickup, (msg) => {
-      try {
-        const { xp, x, y } = msg.payload as { xp: number; x: number; y: number };
-        const pos = worldToScreen(x, y);
-        const color = xp >= 60 ? '#cc66ff' : xp >= 20 ? '#44aaff' : '#44ff66';
-        const floatText = this.add.text(pos.x, pos.y - 10, `+${xp} XP`, {
-          fontSize: '12px', color, stroke: '#000000', strokeThickness: 3,
-          fontStyle: 'bold',
-        }).setOrigin(0.5).setDepth(9000);
-        this.tweens.add({
-          targets: floatText, y: pos.y - 50, alpha: 0,
-          duration: 1200, ease: 'Power2',
-          onComplete: () => floatText.destroy(),
-        });
-      } catch (e) {
-        console.error('[GameScene] XpOrbPickup error:', e);
-      }
-    });
-
-    // NOTE: ChatMessage is handled directly by ChatBox (see ChatBox constructor).
-    // No duplicate handler here to avoid double messages.
   }
 
   // --- Entity Management ---
   private updateRemoteEntity(entity: EntityState): void {
-    const screenPos = worldToScreen(entity.x, entity.y);
-    const targetX = screenPos.x;
-    const targetY = screenPos.y - 27;
-
-    if (this.entities.has(entity.id)) {
-      const remote = this.entities.get(entity.id)!;
-      remote.targetX = targetX;
-      remote.targetY = targetY;
-      remote.level = entity.level;
-      remote.gridX = entity.x;
-      remote.gridY = entity.y;
-      if (entity.hp !== undefined) remote.hp = entity.hp;
-      if (entity.maxHp !== undefined) remote.maxHp = entity.maxHp;
-      return;
-    }
-
-    const textureKey = entity.entityType === 'player' ? 'player' : 'enemy_slime';
-    const sprite = this.add.sprite(targetX, targetY, textureKey);
-    sprite.setOrigin(0.5, 1);
-    sprite.setInteractive({ useHandCursor: true });
-
-    const nameColor = entity.entityType === 'player' ? '#88ccff' : '#ff6666';
-    const displayName = entity.entityType === 'enemy'
-      ? `${entity.name || 'Enemy'} [Lv.${entity.level || 1}]`
-      : entity.name || 'Unknown';
-
-    const nameText = this.add.text(targetX, targetY - 38, displayName, {
-      fontSize: '9px', color: nameColor,
-      stroke: '#000000', strokeThickness: 2,
-    }).setOrigin(0.5);
-
-    this.entities.set(entity.id, {
-      sprite, nameText, targetX, targetY,
-      entityType: entity.entityType,
-      level: entity.level,
-      hp: entity.hp,
-      maxHp: entity.maxHp,
-      gridX: entity.x,
-      gridY: entity.y,
-    });
+    upsertRemoteEntity(this, this.entities, entity);
   }
 
   private removeEntity(id: string): void {
-    const entity = this.entities.get(id);
-    if (entity) {
-      entity.sprite.destroy();
-      entity.nameText.destroy();
-      this.healthBars.remove(id);
-      this.entities.delete(id);
-      if (this.selectedEntityId === id) this.selectedEntityId = null;
+    if (removeRemoteEntity(this.entities, this.healthBars, id) && this.selectedEntityId === id) {
+      this.selectedEntityId = null;
     }
   }
 
   private findEntityAt(worldX: number, worldY: number): string | null {
-    for (const [id, entity] of this.entities) {
-      const dx = Math.abs(entity.sprite.x - worldX);
-      const dy = Math.abs(entity.sprite.y - worldY);
-      if (dx < 24 && dy < 36) return id;
-    }
-    return null;
+    return findEntityAtPosition(this.entities, worldX, worldY);
   }
 
   /** Draw isometric ellipse auras around the player (attack + pickup ranges). */
   private drawPlayerAuras(sx: number, sy: number): void {
     this.attackAura.clear();
     this.pickupAura.clear();
-    if (this.isDead) return;
+    if (isDead.value) return;
 
     // Isometric projection: x-radius = range * TILE_WIDTH/2, y-radius = range * TILE_HEIGHT/2
     const attackRange = 2.5;
     const pickupRange = 1.5;
 
     // Attack aura (red, subtle)
-    this.attackAura.lineStyle(1, 0xff4444, 0.25);
+    this.attackAura.lineStyle(1, ISOMETRIC_THEME.scenes.game.auraAttack, 0.25);
     this.attackAura.strokeEllipse(sx, sy, attackRange * TILE_WIDTH, attackRange * TILE_HEIGHT);
 
     // Pickup/XP orb aura (green, subtle)
-    this.pickupAura.lineStyle(1, 0x44ff66, 0.3);
+    this.pickupAura.lineStyle(1, ISOMETRIC_THEME.scenes.game.auraPickup, 0.3);
     this.pickupAura.strokeEllipse(sx, sy, pickupRange * TILE_WIDTH, pickupRange * TILE_HEIGHT);
   }
 
-  /** Create an invisible interactive rect on the scene (not in a Container) for a UI panel.
-   *  This bypasses the Phaser 3 Container+scrollFactor(0) hit-testing bug. */
-  private createPanelOverlay(
-    x: number, y: number, w: number, h: number,
-    panel: { handleScreenClick(rx: number, ry: number): boolean; isVisible(): boolean }
-  ): void {
-    const overlay = this.add.rectangle(x + w / 2, y + h / 2, w, h, 0x000000, 0)
-      .setScrollFactor(0)
-      .setDepth(3999)
-      .setInteractive();
-    (overlay as any).__panel = panel;
-    overlay.on('pointerdown', (_pointer: Phaser.Input.Pointer) => {
-      if (!panel.isVisible()) return;
-      const relX = _pointer.x - x;
-      const relY = _pointer.y - y;
-      console.log(`[Overlay] click on panel at rel(${relX}, ${relY})`);
-      panel.handleScreenClick(relX, relY);
-      this.uiClickedThisFrame = true;
-    });
-    // Start disabled; synced in update() based on panel visibility
-    if (overlay.input) overlay.input.enabled = false;
-    this.uiOverlays.push(overlay);
-  }
-
-  /** Screen-space check: is pointer over any visible UI panel? */
+  /** Screen-space check: is pointer over the minimap? HTML panels handle their own clicks. */
   private isPointerOverUI(pointer: Phaser.Input.Pointer): boolean {
     const sx = pointer.x;
     const sy = pointer.y;
 
-    // Check overlay-backed panels first (overlays handle clicks, but we still block movement)
-    for (const overlay of this.uiOverlays) {
-      const panel = (overlay as any).__panel as { isVisible(): boolean };
-      if (panel.isVisible() && sx >= overlay.x && sx <= overlay.x + overlay.width && sy >= overlay.y && sy <= overlay.y + overlay.height) {
-        return true;
-      }
+    const w = this.scale.width;
+    // Minimap (top-right)
+    if (sx >= w - 150 && sx <= w - 10 && sy >= 10 && sy <= 150) return true;
+
+    // Town touchpoint prompts (dynamically centered)
+    const bounds = getTouchpointPromptBounds(w);
+    if (
+      sx >= bounds.x &&
+      sx <= bounds.x + bounds.width &&
+      sy >= bounds.y &&
+      sy <= bounds.y + bounds.height
+    ) {
+      return true;
     }
 
-    // Non-interactive UI areas that just consume clicks (no routing needed)
-    const staticUI: [number, number, number, number][] = [
-      [10, 476, 360, 224], // chatBox always visible
-      [10, 28, 160, 55],   // statsUI always visible
-    ];
-    for (const [px, py, pw, ph] of staticUI) {
-      if (sx >= px && sx <= px + pw && sy >= py && sy <= py + ph) {
-        return true;
-      }
-    }
     return false;
   }
 
@@ -931,7 +789,7 @@ export class GameScene extends Phaser.Scene {
 
     if (entity.entityType === 'enemy') {
       this.selectedEntityId = entityId;
-      this.chatBox.addMessage('Target', `Targeting: ${entity.nameText.text}`, 'combat');
+      addChatMessage('combat', 'Target', `Targeting: ${entity.nameText.text}`);
       const dist = Math.sqrt(
         Math.pow(this.playerGridX - entity.gridX, 2) +
         Math.pow(this.playerGridY - entity.gridY, 2)
@@ -941,7 +799,6 @@ export class GameScene extends Phaser.Scene {
         this.attackCooldown = 1000;
         this.showAttackEffect(entity.sprite.x, entity.sprite.y);
       } else if (dist >= 2.5) {
-        // Move toward enemy
         this.targetGridX = entity.gridX;
         this.targetGridY = entity.gridY;
         this.moveSeq++;
@@ -950,10 +807,9 @@ export class GameScene extends Phaser.Scene {
         });
       }
     } else if (entity.entityType === 'player') {
-      // Shift+click = PvP attack
       if (this.input.keyboard && this.input.keyboard.addKey('SHIFT').isDown) {
         this.selectedEntityId = entityId;
-        this.chatBox.addMessage('PvP', `⚔️ Attacking player: ${entity.nameText.text}`, 'combat');
+        addChatMessage('combat', 'PvP', `⚔️ Attacking player: ${entity.nameText.text}`);
         const dist = Math.sqrt(
           Math.pow(this.playerGridX - entity.gridX, 2) +
           Math.pow(this.playerGridY - entity.gridY, 2)
@@ -971,150 +827,31 @@ export class GameScene extends Phaser.Scene {
           });
         }
       } else {
-        this.chatBox.addMessage('Info', `Player: ${entity.nameText.text} [Lv.${entity.level || '?'}] (Shift+click to attack)`, 'system');
+        addChatMessage('system', 'Info', `Player: ${entity.nameText.text} [Lv.${entity.level || '?'}] (Shift+click to attack)`);
       }
     }
   }
 
-  // --- Ground Items ---
-  private readonly RARITY_COLORS: Record<number, number> = {
-    0: 0xffffff, // Common - White
-    1: 0x00ff00, // Uncommon - Green
-    2: 0x4488ff, // Rare - Blue
-    3: 0xaa44ff, // Epic - Purple
-    4: 0xff8800, // Legendary - Orange
-    5: 0xff0044, // Mythic - Red
-  };
+  private updateGroundItems(items: GroundItemPayload[]): void {
+    updateGroundItemViews(this, this.groundItems, items);
+  }
 
-  private updateGroundItems(items: Array<{ id: string; name: string; rarity: number; x: number; y: number }>): void {
-    const currentIds = new Set(items.map(i => i.id));
-
-    // Remove items no longer present
-    for (const [id, gfx] of this.groundItems.entries()) {
-      if (!currentIds.has(id)) {
-        gfx.sprite.destroy();
-        gfx.text.destroy();
-        this.groundItems.delete(id);
-      }
-    }
-
-    // Add/update items
-    for (const item of items) {
-      if (!this.groundItems.has(item.id)) {
-        const pos = worldToScreen(item.x, item.y);
-        const isXpOrb = item.name.startsWith('XP Orb');
-
-        if (isXpOrb) {
-          const orbKey = item.rarity >= 3 ? 'xp_orb_purple' : item.rarity >= 2 ? 'xp_orb_blue' : 'xp_orb_green';
-          const sprite = this.add.sprite(pos.x, pos.y, orbKey)
-            .setDepth(pos.y - 5000)
-            .setAlpha(0.85);
-
-          this.tweens.add({
-            targets: sprite, y: pos.y - 4, duration: 800 + Math.random() * 400,
-            yoyo: true, repeat: -1, ease: 'Sine.easeInOut',
-          });
-
-          const text = this.add.text(0, 0, '').setVisible(false);
-          this.groundItems.set(item.id, { sprite, text, gridX: item.x, gridY: item.y });
-        } else {
-          const color = this.RARITY_COLORS[item.rarity] ?? 0xffffff;
-
-          // Make ground items larger and easier to see
-          const sprite = this.add.sprite(pos.x, pos.y, 'item_drop')
-            .setDepth(pos.y - 5000)
-            .setTint(color)
-            .setScale(1.5);
-
-          const text = this.add.text(pos.x, pos.y - 20, item.name, {
-            fontSize: '9px', color: `#${color.toString(16).padStart(6, '0')}`,
-            stroke: '#000000', strokeThickness: 3,
-          }).setOrigin(0.5).setDepth(pos.y - 4999);
-
-          // Gentle pulsing to draw attention
-          this.tweens.add({
-            targets: sprite, alpha: 0.6, duration: 600,
-            yoyo: true, repeat: -1, ease: 'Sine.easeInOut',
-          });
-
-          this.groundItems.set(item.id, { sprite, text, gridX: item.x, gridY: item.y });
-        }
-      }
-    }
+  private clearGroundItems(): void {
+    clearGroundItemViews(this.groundItems);
   }
 
   // --- Chunk Management ---
-  private requestChunksAround(cx: number, cy: number): void {
-    for (let dx = -2; dx <= 2; dx++) {
-      for (let dy = -2; dy <= 2; dy++) {
-        const key = `${cx + dx},${cy + dy}`;
-        if (!this.loadedChunks.has(key)) {
-          this.loadedChunks.add(key);
-          // Request chunk from server (authoritative terrain)
-          this.network.send(MessageType.RequestChunk, { chunkX: cx + dx, chunkY: cy + dy });
-        }
-      }
-    }
+  private requestChunksAround(cx: number, cy: number, radius?: number): void {
+    const r = radius ?? Math.ceil(2 / this.cameras.main.zoom);
+    requestChunkWindow(this.network, this.loadedChunks, cx, cy, r);
   }
 
   private evictDistantChunks(cx: number, cy: number): void {
-    const maxDist = 4;
-    for (const [key, tiles] of this.chunkTiles) {
-      const [ckx, cky] = key.split(',').map(Number);
-      if (Math.abs(ckx - cx) > maxDist || Math.abs(cky - cy) > maxDist) {
-        tiles.forEach(t => t.destroy());
-        this.chunkTiles.delete(key);
-        this.loadedChunks.delete(key);
-      }
-    }
-  }
-
-  private generateLocalChunk(chunkX: number, chunkY: number): void {
-    const key = `${chunkX},${chunkY}`;
-    if (this.chunkTiles.has(key)) return;
-
-    const tiles: Phaser.GameObjects.Image[] = [];
-    const baseX = chunkX * CHUNK_SIZE;
-    const baseY = chunkY * CHUNK_SIZE;
-
-    for (let y = 0; y < CHUNK_SIZE; y++) {
-      for (let x = 0; x < CHUNK_SIZE; x++) {
-        const wx = baseX + x;
-        const wy = baseY + y;
-        const tileType = this.getProceduralTile(wx, wy);
-        const tileKey = TILE_KEYS[tileType] || 'tile_grass';
-        const screenPos = worldToScreen(wx, wy);
-        const tile = this.add.image(screenPos.x, screenPos.y, tileKey);
-        tile.setOrigin(0.5, 0.5);
-        tile.setDepth(screenPos.y - 10000);
-        tiles.push(tile);
-      }
-    }
-    this.chunkTiles.set(key, tiles);
+    evictRenderedChunks(this.chunkTiles, this.loadedChunks, cx, cy);
   }
 
   private renderChunk(chunk: ChunkDataPayload): void {
-    const key = `${chunk.chunkX},${chunk.chunkY}`;
-    const existing = this.chunkTiles.get(key);
-    if (existing) existing.forEach(t => t.destroy());
-
-    const tiles: Phaser.GameObjects.Image[] = [];
-    const baseX = chunk.chunkX * CHUNK_SIZE;
-    const baseY = chunk.chunkY * CHUNK_SIZE;
-
-    for (let y = 0; y < chunk.tiles.length; y++) {
-      for (let x = 0; x < chunk.tiles[y].length; x++) {
-        const wx = baseX + x;
-        const wy = baseY + y;
-        const tileKey = TILE_KEYS[chunk.tiles[y][x]] || 'tile_grass';
-        const screenPos = worldToScreen(wx, wy);
-        const tile = this.add.image(screenPos.x, screenPos.y, tileKey);
-        tile.setOrigin(0.5, 0.5);
-        tile.setDepth(screenPos.y - 10000);
-        tiles.push(tile);
-      }
-    }
-    this.chunkTiles.set(key, tiles);
+    renderChunkData(this, this.chunkTiles, this.loadedChunks, chunk);
   }
 
   // --- Visual Effects ---
@@ -1123,7 +860,7 @@ export class GameScene extends Phaser.Scene {
 
     // Text banner
     const text = this.add.text(x, y - 60, '⭐ LEVEL UP! ⭐', {
-      fontSize: '18px', color: '#ffdd00', stroke: '#000', strokeThickness: 4,
+      fontSize: '20px', color: hexColor(ISOMETRIC_THEME.scenes.game.levelUp), stroke: hexColor(ISOMETRIC_THEME.palette.shadow), strokeThickness: 4,
       fontStyle: 'bold',
     }).setOrigin(0.5).setDepth(5000);
 
@@ -1134,10 +871,10 @@ export class GameScene extends Phaser.Scene {
     });
 
     // Star particle burst
-    this.spawnParticleBurst(x, y - 20, 'particle_star', 0xffdd00, 18, 80, 1500);
+    this.spawnParticleBurst(x, y - 20, 'particle_star', ISOMETRIC_THEME.scenes.game.levelUp, 18, 80, 1500);
 
     // Golden ring expanding outward
-    const ring = this.add.circle(x, y, 5, 0xffdd00, 0.6).setDepth(4999);
+    const ring = this.add.circle(x, y, 5, ISOMETRIC_THEME.scenes.game.levelUp, 0.6).setDepth(4999);
     this.tweens.add({
       targets: ring, scaleX: 8, scaleY: 4, alpha: 0,
       duration: 800, ease: 'Cubic.easeOut',
@@ -1146,11 +883,11 @@ export class GameScene extends Phaser.Scene {
   }
 
   private showDamageNumber(x: number, y: number, damage: number, isCrit: boolean): void {
-    const color = isCrit ? '#ff4444' : '#ffffff';
+    const color = isCrit ? hexColor(ISOMETRIC_THEME.scenes.game.alert) : hexColor(ISOMETRIC_THEME.text.primary);
     const prefix = isCrit ? '💥 CRIT! ' : '';
-    const size = isCrit ? '16px' : '11px';
+    const size = isCrit ? '18px' : '13px';
     const text = this.add.text(x + Phaser.Math.Between(-10, 10), y, `${prefix}-${damage}`, {
-      fontSize: size, color, stroke: '#000', strokeThickness: 2,
+      fontSize: size, color, stroke: hexColor(ISOMETRIC_THEME.palette.shadow), strokeThickness: 2,
       fontStyle: isCrit ? 'bold' : 'normal',
     }).setOrigin(0.5).setDepth(6000);
 
@@ -1166,13 +903,13 @@ export class GameScene extends Phaser.Scene {
 
     // Blood splat for big hits
     if (isCrit) {
-      this.spawnParticleBurst(x, y, 'particle_blood', 0xcc0000, 8, 30, 600);
+      this.spawnParticleBurst(x, y, 'particle_blood', ISOMETRIC_THEME.text.danger, 8, 30, 600);
     }
   }
 
   private showAttackEffect(x: number, y: number): void {
     const slash = this.add.text(x, y - 12, '⚔️', {
-      fontSize: '18px',
+      fontSize: '20px',
     }).setOrigin(0.5).setDepth(5500);
 
     this.tweens.add({
@@ -1182,7 +919,51 @@ export class GameScene extends Phaser.Scene {
     });
 
     // Combat sparks
-    this.spawnParticleBurst(x, y - 8, 'particle_spark', 0xffffaa, 6, 25, 400);
+    this.spawnParticleBurst(x, y - 8, 'particle_spark', ISOMETRIC_THEME.ui.accents.highlight, 6, 25, 400);
+  }
+
+  private showMissText(x: number, y: number): void {
+    const text = this.add.text(x + Phaser.Math.Between(-8, 8), y, 'MISS', {
+      fontSize: '12px',
+      color: '#aaaaaa',
+      stroke: hexColor(ISOMETRIC_THEME.palette.shadow),
+      strokeThickness: 2,
+      fontStyle: 'italic',
+    }).setOrigin(0.5).setDepth(6000);
+
+    this.tweens.add({
+      targets: text,
+      y: y - 25,
+      alpha: 0,
+      duration: 800,
+      ease: 'Power2',
+      onComplete: () => text.destroy(),
+    });
+  }
+
+  private shakeCamera(intensity = 0.005, duration = 150): void {
+    this.cameras.main.shake(duration, intensity);
+  }
+
+  private showHealNumber(x: number, y: number, amount: number): void {
+    const text = this.add.text(x + Phaser.Math.Between(-8, 8), y, `+${amount}`, {
+      fontSize: '14px',
+      color: hexColor(ISOMETRIC_THEME.ui.accents.success),
+      stroke: hexColor(ISOMETRIC_THEME.palette.shadow),
+      strokeThickness: 2,
+      fontStyle: 'bold',
+    }).setOrigin(0.5).setDepth(6000);
+
+    this.tweens.add({
+      targets: text,
+      y: y - 40,
+      alpha: 0,
+      duration: 1200,
+      ease: 'Power2',
+      onComplete: () => text.destroy(),
+    });
+
+    this.spawnParticleBurst(x, y, 'particle_regen', ISOMETRIC_THEME.ui.accents.success, 4, 20, 600);
   }
 
   private showLootPickupEffect(x: number, y: number, rarityColor: number): void {
@@ -1191,7 +972,7 @@ export class GameScene extends Phaser.Scene {
 
   private showDeathEffect(x: number, y: number): void {
     // Skull emoji
-    const skull = this.add.text(x, y - 20, '💀', { fontSize: '24px' })
+    const skull = this.add.text(x, y - 20, '💀', { fontSize: '28px' })
       .setOrigin(0.5).setDepth(5500);
     this.tweens.add({
       targets: skull, y: y - 80, alpha: 0, scale: 1.5,
@@ -1199,7 +980,7 @@ export class GameScene extends Phaser.Scene {
       onComplete: () => skull.destroy(),
     });
     // Red flash
-    this.spawnParticleBurst(x, y, 'particle_blood', 0xcc0000, 20, 50, 1000);
+    this.spawnParticleBurst(x, y, 'particle_blood', ISOMETRIC_THEME.text.danger, 20, 50, 1000);
   }
 
   /** Spawn a burst of particles that fly outward and fade */
@@ -1227,46 +1008,8 @@ export class GameScene extends Phaser.Scene {
   }
 
   // --- Utility ---
-  private closeAllPanels(): void {
-    if (this.inventoryUI.isVisible()) this.inventoryUI.toggle();
-    if (this.equipmentUI.isVisible()) this.equipmentUI.toggle();
-    if (this.bankUI.isVisible()) this.bankUI.toggle();
-    if (this.craftingUI.isVisible()) this.craftingUI.toggle();
-    if (this.marketplaceUI.isVisible()) this.marketplaceUI.toggle();
-  }
-
-  private getProceduralTile(x: number, y: number): number {
-    const hash = this.simpleHash(x, y);
-    const distFromCenter = Math.sqrt(x * x + y * y);
-
-    if (distFromCenter < 15) return 7; // town
-    const waterNoise = this.simpleHash(x * 3, y * 3 + 1000) / 4294967296;
-    if (waterNoise < 0.08) return 1; // water
-
-    const angle = Math.atan2(y, x);
-    const biomeNoise = this.simpleHash(Math.floor(x / 10), Math.floor(y / 10) + 5000) / 4294967296;
-
-    if (distFromCenter > 60) {
-      if (biomeNoise < 0.3) return 4; // snow
-      if (biomeNoise < 0.5) return 3; // stone
-    }
-
-    if (angle > 0 && angle < Math.PI / 2) {
-      if (hash / 4294967296 < 0.4) return 5; // forest
-    } else if (angle > Math.PI / 2) {
-      if (hash / 4294967296 < 0.3) return 2; // sand
-    } else if (angle < -Math.PI / 2) {
-      if (hash / 4294967296 < 0.25) return 6; // swamp
-    }
-
-    return 0; // grass
-  }
-
-  private simpleHash(x: number, y: number): number {
-    let h = (x * 374761393 + y * 668265263 + 1013904223) | 0;
-    h = (h ^ (h >> 13)) * 1274126177;
-    h = h ^ (h >> 16);
-    return h >>> 0;
+  private canUseBank(): boolean {
+    return this.townTouchpoints.canUseBank(this.playerGridX, this.playerGridY);
   }
 
   private drawCursorHighlight(wx: number, wy: number): void {
@@ -1274,7 +1017,7 @@ export class GameScene extends Phaser.Scene {
     const pos = worldToScreen(wx, wy);
     const hw = TILE_WIDTH / 2;
     const hh = TILE_HEIGHT / 2;
-    this.cursorHighlight.lineStyle(2, 0xffffff, 0.6);
+    this.cursorHighlight.lineStyle(2, ISOMETRIC_THEME.scenes.game.cursor, 0.6);
     this.cursorHighlight.beginPath();
     this.cursorHighlight.moveTo(pos.x, pos.y - hh);
     this.cursorHighlight.lineTo(pos.x + hw, pos.y);
@@ -1285,28 +1028,282 @@ export class GameScene extends Phaser.Scene {
   }
 
   private setupConnectionOverlay(): void {
-    const overlay = this.add.rectangle(GAME_WIDTH / 2, 0, 260, 28, 0x000000, 0.75)
+    const cx = this.scale.width / 2;
+    const overlay = this.add.rectangle(cx, 0, 260, 28, ISOMETRIC_THEME.scenes.game.overlay, 0.75)
       .setScrollFactor(0).setDepth(10000).setOrigin(0.5, 0).setVisible(false);
-    const label = this.add.text(GAME_WIDTH / 2, 6, '', {
-      fontSize: '12px', color: '#ff6644', fontStyle: 'bold',
+    const label = this.add.text(cx, 6, '', {
+      fontSize: '14px', color: hexColor(ISOMETRIC_THEME.scenes.game.alert), fontStyle: 'bold',
     }).setScrollFactor(0).setDepth(10001).setOrigin(0.5, 0).setVisible(false);
 
-    this.network.onStatusChange((status) => {
+    // Reposition on resize
+    this.scale.on('resize', (gameSize: Phaser.Structs.Size) => {
+      const newCx = gameSize.width / 2;
+      overlay.setX(newCx);
+      label.setX(newCx);
+    });
+
+    const connectionStatusHandler = (status: 'connected' | 'disconnected' | 'reconnecting') => {
       if (status === 'connected') {
         overlay.setVisible(false);
         label.setVisible(false);
-        this.chatBox.addSystemMessage('✅ Reconnected to server.');
+        addChatMessage('system', 'System', '✅ Reconnected to server.');
       } else if (status === 'reconnecting') {
         overlay.setVisible(true);
         label.setVisible(true);
         label.setText('⟳ Reconnecting to server...');
-        label.setColor('#ffaa44');
+        label.setColor(hexColor(ISOMETRIC_THEME.scenes.game.warning));
       } else {
         overlay.setVisible(true);
         label.setVisible(true);
         label.setText('⚠ Disconnected from server');
-        label.setColor('#ff4444');
+        label.setColor(hexColor(ISOMETRIC_THEME.scenes.game.alert));
       }
+    };
+
+    this.lifecycle.registerStatusHandler(this.network, connectionStatusHandler);
+    this.lifecycle.onCleanup(() => {
+      overlay.destroy();
+      label.destroy();
     });
+  }
+
+  private applyPlayerPosition(update: { x?: number; y?: number; targetX?: number; targetY?: number }): void {
+    if (update.x !== undefined) this.playerGridX = update.x;
+    if (update.y !== undefined) this.playerGridY = update.y;
+    if (update.targetX !== undefined) this.targetGridX = update.targetX;
+    if (update.targetY !== undefined) this.targetGridY = update.targetY;
+  }
+
+  private isMovementInputActive(): boolean {
+    return (
+      this.keyW.isDown || this.keyS.isDown || this.keyA.isDown || this.keyD.isDown ||
+      this.cursors.up.isDown || this.cursors.down.isDown ||
+      this.cursors.left.isDown || this.cursors.right.isDown
+    );
+  }
+
+  private removeMissingEntities(seenIds: Set<string>): void {
+    const removedIds = removeMissingRemoteEntities(this.entities, this.healthBars, seenIds);
+    if (this.selectedEntityId && removedIds.includes(this.selectedEntityId)) {
+      this.selectedEntityId = null;
+    }
+  }
+
+  private showXpOrbPickup(x: number, y: number, xp: number): void {
+    const pos = worldToScreen(x, y);
+    const color = xp >= 60
+      ? hexColor(ISOMETRIC_THEME.scenes.game.highXp)
+      : xp >= 20
+        ? hexColor(ISOMETRIC_THEME.scenes.game.midXp)
+        : hexColor(ISOMETRIC_THEME.scenes.game.lowXp);
+    const floatText = this.add.text(pos.x, pos.y - 10, `+${xp} XP`, {
+      fontSize: '14px',
+      color,
+      stroke: hexColor(ISOMETRIC_THEME.palette.shadow),
+      strokeThickness: 3,
+      fontStyle: 'bold',
+    }).setOrigin(0.5).setDepth(9000);
+    this.tweens.add({
+      targets: floatText,
+      y: pos.y - 50,
+      alpha: 0,
+      duration: 1200,
+      ease: 'Power2',
+      onComplete: () => floatText.destroy(),
+    });
+  }
+
+  // --- Status Effect Visuals ---
+
+  private static readonly EFFECT_CONFIG: Record<string, {
+    emoji: string;
+    color: number;
+    particle: string;
+    label: string;
+    isBuff: boolean;
+  }> = {
+    Poison: { emoji: '🧪', color: 0x44cc44, particle: 'particle_poison', label: 'POISONED', isBuff: false },
+    Burn: { emoji: '🔥', color: 0xff6622, particle: 'particle_fire', label: 'BURNING', isBuff: false },
+    Bleed: { emoji: '🩸', color: 0xcc2222, particle: 'particle_bleed', label: 'BLEEDING', isBuff: false },
+    Freeze: { emoji: '❄️', color: 0x44bbff, particle: 'particle_ice', label: 'FROZEN', isBuff: false },
+    Stun: { emoji: '💫', color: 0xffdd44, particle: 'particle_stun', label: 'STUNNED', isBuff: false },
+    Weakness: { emoji: '⬇️', color: 0x9944cc, particle: 'particle_glow', label: 'WEAKENED', isBuff: false },
+    ArmorBreak: { emoji: '🛡️', color: 0x8b6914, particle: 'particle_spark', label: 'ARMOR BROKEN', isBuff: false },
+    Regen: { emoji: '💚', color: 0x44ee88, particle: 'particle_regen', label: 'REGEN', isBuff: true },
+    Strength: { emoji: '💪', color: 0xff4444, particle: 'particle_strength', label: 'STRENGTHENED', isBuff: true },
+    Shield: { emoji: '🛡️', color: 0x4488ff, particle: 'particle_shield', label: 'SHIELDED', isBuff: true },
+    Haste: { emoji: '⚡', color: 0x44ffff, particle: 'particle_haste', label: 'HASTE', isBuff: true },
+    Lifesteal: { emoji: '🧛', color: 0xcc2244, particle: 'particle_blood', label: 'LIFESTEAL', isBuff: true },
+    Thorns: { emoji: '🌿', color: 0xddaa22, particle: 'particle_spark', label: 'THORNS', isBuff: true },
+    Invulnerable: { emoji: '✨', color: 0xffffff, particle: 'particle_glow', label: 'INVULNERABLE', isBuff: true },
+  };
+
+  private showEffectApplied(effectType: string): void {
+    const config = GameScene.EFFECT_CONFIG[effectType];
+    if (!config) return;
+
+    const { x, y } = this.playerSprite;
+
+    // Flash announcement text
+    const label = `${config.emoji} ${config.label}!`;
+    const text = this.add.text(x, y - 70, label, {
+      fontSize: '16px',
+      color: hexColor(config.color),
+      stroke: hexColor(ISOMETRIC_THEME.palette.shadow),
+      strokeThickness: 3,
+      fontStyle: 'bold',
+    }).setOrigin(0.5).setDepth(6500);
+
+    this.tweens.add({
+      targets: text,
+      y: y - 120,
+      alpha: 0,
+      duration: 2000,
+      ease: 'Power2',
+      onComplete: () => text.destroy(),
+    });
+
+    // Particle burst
+    const particleTex = this.textures.exists(config.particle) ? config.particle : 'particle_glow';
+    this.spawnParticleBurst(x, y - 20, particleTex, config.color, 12, 50, 1000);
+
+    // Screen tint flash for debuffs
+    if (!config.isBuff) {
+      const sw = this.scale.width;
+      const sh = this.scale.height;
+      const screenFlash = this.add.rectangle(
+        sw / 2, sh / 2,
+        sw, sh,
+        config.color, 0.15
+      ).setScrollFactor(0).setDepth(9500);
+
+      this.tweens.add({
+        targets: screenFlash,
+        alpha: 0,
+        duration: 500,
+        ease: 'Power2',
+        onComplete: () => screenFlash.destroy(),
+      });
+    }
+
+    // Ongoing effect icon above player
+    this.cleanupEffect(effectType);
+    const iconOffsetX = this.activeEffects.size * 18;
+    const icon = this.add.text(x - 30 + iconOffsetX, y - 75, config.emoji, {
+      fontSize: '14px',
+    }).setOrigin(0.5).setDepth(5200);
+
+    // Pulsing animation on the icon
+    const tween = this.tweens.add({
+      targets: icon,
+      scale: 1.3,
+      duration: 600,
+      yoyo: true,
+      repeat: -1,
+      ease: 'Sine.easeInOut',
+    });
+
+    this.activeEffects.set(effectType, { icon, tween });
+    this.repositionEffectIcons();
+  }
+
+  private showEffectRemoved(effectType: string): void {
+    const config = GameScene.EFFECT_CONFIG[effectType];
+    if (!config) return;
+
+    const { x, y } = this.playerSprite;
+
+    // "Wore off" text
+    const text = this.add.text(x, y - 60, `${config.emoji} ${config.label} wore off`, {
+      fontSize: '12px',
+      color: hexColor(ISOMETRIC_THEME.text.muted),
+      stroke: hexColor(ISOMETRIC_THEME.palette.shadow),
+      strokeThickness: 2,
+    }).setOrigin(0.5).setDepth(6500);
+
+    this.tweens.add({
+      targets: text,
+      y: y - 100,
+      alpha: 0,
+      duration: 1500,
+      ease: 'Power2',
+      onComplete: () => text.destroy(),
+    });
+
+    this.cleanupEffect(effectType);
+    this.repositionEffectIcons();
+  }
+
+  private showEffectTick(effectType: string, value: number): void {
+    const config = GameScene.EFFECT_CONFIG[effectType];
+    if (!config) return;
+
+    const { x, y } = this.playerSprite;
+    const offsetX = Phaser.Math.Between(-15, 15);
+
+    if (config.isBuff) {
+      // Buff ticks show as green healing numbers
+      const tickText = this.add.text(x + offsetX, y - 40, `+${value}`, {
+        fontSize: '12px',
+        color: hexColor(config.color),
+        stroke: hexColor(ISOMETRIC_THEME.palette.shadow),
+        strokeThickness: 2,
+      }).setOrigin(0.5).setDepth(6000);
+
+      this.tweens.add({
+        targets: tickText,
+        y: y - 70,
+        alpha: 0,
+        duration: 800,
+        ease: 'Power2',
+        onComplete: () => tickText.destroy(),
+      });
+    } else {
+      // Debuff ticks show as colored damage numbers
+      const tickText = this.add.text(x + offsetX, y - 40, `-${value}`, {
+        fontSize: '11px',
+        color: hexColor(config.color),
+        stroke: hexColor(ISOMETRIC_THEME.palette.shadow),
+        strokeThickness: 2,
+        fontStyle: 'bold',
+      }).setOrigin(0.5).setDepth(6000);
+
+      this.tweens.add({
+        targets: tickText,
+        y: y - 65,
+        alpha: 0,
+        duration: 700,
+        ease: 'Power2',
+        onComplete: () => tickText.destroy(),
+      });
+    }
+
+    // Small particle burst per tick
+    const particleTex = this.textures.exists(config.particle) ? config.particle : 'particle_glow';
+    this.spawnParticleBurst(x, y - 20, particleTex, config.color, 3, 20, 400);
+  }
+
+  private cleanupEffect(effectType: string): void {
+    const existing = this.activeEffects.get(effectType);
+    if (existing) {
+      existing.icon?.destroy();
+      existing.tween?.destroy();
+      existing.particle?.destroy();
+      existing.tintOverlay?.destroy();
+      this.activeEffects.delete(effectType);
+    }
+  }
+
+  private repositionEffectIcons(): void {
+    let idx = 0;
+    for (const [, data] of this.activeEffects) {
+      if (data.icon) {
+        // Position icons in a row above the player
+        const baseX = this.playerSprite.x - ((this.activeEffects.size - 1) * 9);
+        data.icon.setX(baseX + idx * 18);
+        data.icon.setY(this.playerSprite.y - 75);
+      }
+      idx++;
+    }
   }
 }
