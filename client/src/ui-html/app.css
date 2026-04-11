@@ -1,0 +1,262 @@
+@import "tailwindcss";
+
+/* RealmForge theme tokens — generated from isometricTheme.ts */
+@theme {
+  --color-rf-canvas: #0a0f16;
+  --color-rf-canvas-alt: #11161f;
+  --color-rf-surface: #141b27;
+  --color-rf-surface-elevated: #171f2d;
+  --color-rf-surface-muted: #1c2433;
+  --color-rf-surface-inset: #232d41;
+  --color-rf-surface-inset-warm: #263247;
+  --color-rf-surface-tooltip: #101621;
+
+  --color-rf-border: #526a89;
+  --color-rf-border-muted: #435872;
+  --color-rf-border-strong: #79a4cf;
+  --color-rf-shadow: #05070c;
+
+  --color-rf-gold: #f0c35b;
+  --color-rf-emerald: #59d18c;
+  --color-rf-sky: #73b6ff;
+  --color-rf-violet: #bf8dff;
+  --color-rf-amber: #f1ae55;
+  --color-rf-coral: #e96b63;
+  --color-rf-stone: #97a0af;
+
+  --color-rf-text: #f4f7fb;
+  --color-rf-text-secondary: #c9d2de;
+  --color-rf-text-muted: #9dacbf;
+  --color-rf-text-dim: #6d8095;
+
+  --color-rf-accent: #73b6ff;
+  --color-rf-success: #59d18c;
+  --color-rf-danger: #e96b63;
+  --color-rf-warning: #f1ae55;
+
+  --color-rf-hp-high: #d34d44;
+  --color-rf-hp-mid: #e08b3b;
+  --color-rf-hp-low: #ff6f63;
+  --color-rf-hp-bg: #3a1117;
+  --color-rf-mp: #4f86e3;
+  --color-rf-mp-bg: #10243e;
+  --color-rf-xp: #f0c35b;
+  --color-rf-xp-bg: #3a310e;
+  --color-rf-health-high: #59d18c;
+  --color-rf-health-mid: #f0c35b;
+  --color-rf-health-low: #d34d44;
+
+  --color-rf-rarity-common: #c8d0dc;
+  --color-rf-rarity-uncommon: #2ecc71;
+  --color-rf-rarity-rare: #3498db;
+  --color-rf-rarity-epic: #9b59b6;
+  --color-rf-rarity-legendary: #f39c12;
+  --color-rf-rarity-mythic: #e74c3c;
+
+  --color-rf-chat-global: #f4f7fb;
+  --color-rf-chat-local: #7ce3a1;
+  --color-rf-chat-whisper: #bf8dff;
+  --color-rf-chat-trade: #f1ae55;
+  --color-rf-chat-system: #f0c35b;
+  --color-rf-chat-combat: #e96b63;
+
+  --color-rf-chrome-header: #1b2637;
+  --color-rf-chrome-trim: #32445c;
+  --color-rf-chrome-inset: #0f1620;
+  --color-rf-chrome-btn: #1b2737;
+  --color-rf-chrome-btn-active: #243449;
+}
+
+/* Base game UI styles */
+#ui-root {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 10;
+  font-family: 'JetBrains Mono', 'Courier New', monospace;
+  color: var(--color-rf-text);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+#ui-root * {
+  box-sizing: border-box;
+}
+
+/* Interactive children get pointer events back */
+#ui-root [data-interactive] {
+  pointer-events: auto;
+}
+
+/* Scrollbar styling for game panels */
+#ui-root ::-webkit-scrollbar {
+  width: 4px;
+}
+#ui-root ::-webkit-scrollbar-track {
+  background: var(--color-rf-surface);
+}
+#ui-root ::-webkit-scrollbar-thumb {
+  background: var(--color-rf-border-muted);
+  border-radius: 2px;
+}
+#ui-root ::-webkit-scrollbar-thumb:hover {
+  background: var(--color-rf-border);
+}
+
+/* Panel open animation */
+@keyframes panel-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* Toast slide-in from right */
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateX(100%);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+/* Toast fade-out */
+@keyframes toast-out {
+  from {
+    opacity: 1;
+    transform: translateX(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateX(60%);
+  }
+}
+
+/* Overlay fade-in */
+@keyframes overlay-fade {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+@utility animate-panel-in {
+  animation: panel-in 200ms ease-out both;
+}
+
+@utility animate-toast-in {
+  animation: toast-in 300ms ease-out both;
+}
+
+@utility animate-toast-out {
+  animation: toast-out 250ms ease-in both;
+}
+
+@utility animate-overlay-fade {
+  animation: overlay-fade 300ms ease-out both;
+}
+
+@keyframes world-event {
+  0% { opacity: 0; transform: translateX(-50%) scaleX(0.3); }
+  20% { opacity: 1; transform: translateX(-50%) scaleX(1.05); }
+  30% { transform: translateX(-50%) scaleX(1); }
+  80% { opacity: 1; }
+  100% { opacity: 0; transform: translateX(-50%) scaleX(0.5); }
+}
+
+@utility animate-world-event {
+  animation: world-event 5s ease-out both;
+}
+
+/* Loading screen shimmer */
+@keyframes shimmer {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(200%); }
+}
+
+@utility animate-shimmer {
+  animation: shimmer 1.5s ease-in-out infinite;
+}
+
+/* ── Chat message slide-in ── */
+@keyframes msg-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@utility animate-msg-in {
+  animation: msg-in 180ms ease-out both;
+}
+
+/* ── Bar pulse glow (level up / low HP warning) ── */
+@keyframes bar-pulse {
+  0%, 100% { filter: brightness(1) drop-shadow(0 0 0 transparent); }
+  50%      { filter: brightness(1.3) drop-shadow(0 0 4px currentColor); }
+}
+@utility animate-bar-pulse {
+  animation: bar-pulse 1.2s ease-in-out infinite;
+}
+
+/* ── Health bar gradient overlay ── */
+.hp-bar-fill {
+  background: linear-gradient(180deg, rgba(255,255,255,0.12) 0%, transparent 60%);
+  position: relative;
+}
+.hp-bar-fill::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.06) 50%, transparent);
+  border-radius: inherit;
+}
+
+.mp-bar-fill {
+  background: linear-gradient(180deg, rgba(255,255,255,0.1) 0%, transparent 60%);
+}
+
+/* ── Button hover glow ── */
+.btn-glow:hover {
+  box-shadow: 0 0 12px rgba(115, 182, 255, 0.15), inset 0 1px 0 rgba(255,255,255,0.05);
+}
+.btn-glow:active {
+  transform: scale(0.97);
+  box-shadow: inset 0 2px 4px rgba(0,0,0,0.3);
+}
+
+/* ── Death vignette ── */
+@keyframes death-vignette {
+  0%, 100% { box-shadow: inset 0 0 100px 40px rgba(180,30,20,0.4); }
+  50%      { box-shadow: inset 0 0 120px 50px rgba(200,40,30,0.5); }
+}
+@utility animate-death-vignette {
+  animation: death-vignette 2s ease-in-out infinite;
+}
+
+/* ── Rarity shimmer (hover on items) ── */
+@keyframes rarity-shimmer {
+  0%   { background-position: -100% 0; }
+  100% { background-position: 200% 0; }
+}
+.item-shimmer:hover::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.08), transparent);
+  background-size: 200% 100%;
+  animation: rarity-shimmer 1.2s ease-in-out infinite;
+  pointer-events: none;
+}
+
+/* ── Level badge glow ── */
+@keyframes level-glow {
+  0%, 100% { text-shadow: 0 0 4px rgba(240,195,91,0.3); }
+  50%      { text-shadow: 0 0 10px rgba(240,195,91,0.6); }
+}
+.level-badge {
+  animation: level-glow 2s ease-in-out infinite;
+}

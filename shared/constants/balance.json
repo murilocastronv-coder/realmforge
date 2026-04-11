@@ -2,14 +2,18 @@
   "level_system": {
     "base_xp": 100,
     "xp_exponent": 2.5,
+    "max_level": 60,
     "stat_gains": {
-      "hp": 10.0,
-      "mp": 5.0,
+      "hp": 12.0,
+      "mp": 6.0,
       "atk": 5.0,
       "def": 3.0,
       "spd": 2.0,
       "lck": 1.0
     },
+    "stat_points_per_level": 3,
+    "bonus_stat_points_levels": [10, 20, 30, 40, 50],
+    "bonus_stat_points_amount": 2,
     "diminishing_threshold": 50,
     "diminishing_rate": 0.005,
     "post_threshold_decay": 0.6
@@ -21,7 +25,10 @@
     "crit_multiplier_per_lck": 0.005,
     "damage_variance": 0.1,
     "attack_range": 1.5,
-    "attack_cooldown_ms": 800
+    "attack_cooldown_ms": 800,
+    "level_difference_damage_scaling": 0.05,
+    "max_level_damage_penalty": 0.50,
+    "max_level_damage_bonus": 0.50
   },
   "pvp": {
     "inventory_drop_rate": 0.3,
@@ -34,11 +41,51 @@
     "base_atk": 8,
     "base_def": 3,
     "level_scaling": 0.15,
+    "high_level_scaling_threshold": 25,
+    "high_level_scaling_bonus": 0.08,
     "xp_base": 20,
     "xp_level_exponent": 1.5,
-    "spawn_density_per_chunk": [2, 5],
+    "xp_penalty_per_level_below": 0.10,
+    "xp_penalty_max": 0.80,
+    "spawn_density_per_chunk": [2, 6],
     "respawn_check_interval_ticks": 200,
-    "min_enemy_count": 150
+    "min_enemy_count": 200,
+    "elite_spawn_min_zone": 3,
+    "boss_spawn_min_zone": 5
+  },
+  "crafting_tiers": [
+    { "tier": 1, "name": "Starter", "level": 1, "zone": 1 },
+    { "tier": 2, "name": "Intermediate", "level": 5, "zone": 2 },
+    { "tier": 3, "name": "Advanced", "level": 10, "zone": 3 },
+    { "tier": 4, "name": "Expert", "level": 15, "zone": 4 },
+    { "tier": 5, "name": "Adamantite", "level": 20, "zone": 5 },
+    { "tier": 6, "name": "Void", "level": 30, "zone": 7 },
+    { "tier": 7, "name": "Celestial", "level": 40, "zone": 9 },
+    { "tier": 8, "name": "Mythic", "level": 50, "zone": 12 }
+  ],
+  "material_zones": {
+    "wood": 1,
+    "iron_ore": 1,
+    "leather": 1,
+    "herb": 1,
+    "coal": 2,
+    "gold_ore": 3,
+    "gem_shard": 3,
+    "silk": 4,
+    "mithril_ore": 4,
+    "dragon_scale": 5,
+    "adamantite_ore": 5,
+    "shadow_essence": 6,
+    "void_shard": 6,
+    "chaos_crystal": 7,
+    "primordial_core": 7,
+    "phoenix_ash": 7,
+    "celestial_dust": 9,
+    "star_fragment": 9,
+    "ancient_relic": 9,
+    "mythic_ingot": 12,
+    "soul_fragment": 12,
+    "titan_bone": 12
   },
   "world": {
     "chunk_size": 32,

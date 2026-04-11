@@ -50,7 +50,7 @@ export interface ChatMessage {
 }
 
 // ─── Panel State ─────────────────────────────────────────────
-export type PanelId = 'inventory' | 'equipment' | 'bank' | 'crafting' | 'marketplace' | 'stats' | 'settings' | 'character' | 'achievements' | 'combatlog' | 'social' | 'worldmap' | 'leaderboard' | 'skilltree' | 'guild' | 'enchant' | 'fishing' | 'factions';
+export type PanelId = 'inventory' | 'equipment' | 'bank' | 'crafting' | 'marketplace' | 'stats' | 'settings' | 'character' | 'achievements' | 'combatlog' | 'social' | 'worldmap' | 'leaderboard' | 'skilltree' | 'guild' | 'enchant' | 'fishing' | 'factions' | 'mining' | 'pets' | 'mail' | 'arena' | 'dailyquests' | 'dungeonFinder' | 'bestiary' | 'bounty' | 'blessings' | 'runes';
 
 // ─── Signals (reactive state) ────────────────────────────────
 export const playerStats = signal<PlayerStats>({ ...DEFAULT_STATS });
@@ -144,6 +144,16 @@ export interface WorldEventData {
 }
 export const worldEvent = signal<WorldEventData | null>(null);
 
+// Persistent active world event (with timer)
+export interface ActiveWorldEvent {
+  type: string;
+  title: string;
+  icon: string;
+  description: string;
+  expiresAt: number; // Date.now() + remaining ms
+}
+export const activeWorldEvent = signal<ActiveWorldEvent | null>(null);
+
 export function triggerWorldEvent(title: string, icon: string, subtitle?: string): void {
   worldEvent.value = { title, subtitle, icon, timestamp: Date.now() };
   setTimeout(() => {
@@ -151,6 +161,33 @@ export function triggerWorldEvent(title: string, icon: string, subtitle?: string
       worldEvent.value = null;
     }
   }, 5000);
+}
+
+export function setActiveWorldEvent(type: string, durationMs: number): void {
+  const EVENT_INFO: Record<string, { title: string; icon: string; description: string }> = {
+    double_xp: { title: 'Double XP', icon: '⭐', description: '2× Experience from kills!' },
+    gold_rush: { title: 'Gold Rush', icon: '💰', description: '2× Gold from kills!' },
+    lucky_hour: { title: 'Lucky Hour', icon: '🍀', description: '1.2× XP & Gold!' },
+    invasion: { title: 'Monster Invasion', icon: '👹', description: 'Elite enemies roam the land!' },
+    defense_buff: { title: 'Defense Aura', icon: '🛡️', description: 'All players shielded!' },
+    rare_spawn: { title: 'Rare Spawns', icon: '✨', description: 'Rare enemies appearing!' },
+    merchant_sale: { title: 'Merchant Sale', icon: '🏪', description: 'NPC prices reduced!' },
+    elemental_surge: { title: 'Elemental Surge', icon: '⚡', description: '1.5× Gold & elemental power!' },
+  };
+  const info = EVENT_INFO[type] || { title: type, icon: '🌍', description: 'A world event is active!' };
+  activeWorldEvent.value = {
+    type,
+    title: info.title,
+    icon: info.icon,
+    description: info.description,
+    expiresAt: Date.now() + durationMs,
+  };
+  // Clear when expires
+  setTimeout(() => {
+    if (activeWorldEvent.value?.type === type) {
+      activeWorldEvent.value = null;
+    }
+  }, durationMs);
 }
 
 // ─── Quests ──────────────────────────────────────────────────
@@ -354,6 +391,28 @@ export interface FishingResult {
 export const lastFishingResult = signal<FishingResult | null>(null);
 export const isFishing = signal<boolean>(false);
 
+// ─── Mining / Gathering ─────────────────────────────────────
+export interface GatherResultItem {
+  name: string;
+  icon: string;
+  quantity: number;
+  rarity: number;
+}
+export interface GatherResult {
+  items: GatherResultItem[];
+  xpGained: number;
+  miningLevel: number;
+  gatheringLevel: number;
+  miningXp?: number;
+  gatheringXp?: number;
+}
+export const lastGatherResult = signal<GatherResult | null>(null);
+export const isGathering = signal<boolean>(false);
+export const miningLevel = signal<number>(1);
+export const gatheringLevel = signal<number>(1);
+export const miningXp = signal<number>(0);
+export const gatheringXp = signal<number>(0);
+
 // ─── Factions ───────────────────────────────────────────────
 export interface FactionInfo {
   id: string;
@@ -372,6 +431,130 @@ export interface SetBonus {
   bonuses: { pieces: number; stat: string; value: number }[];
 }
 export const activeSets = signal<SetBonus[]>([]);
+
+// ─── Weather ────────────────────────────────────────────────
+export interface WeatherState {
+  weather: string;
+  icon: string;
+  intensity: number;
+}
+export const currentWeather = signal<WeatherState>({ weather: 'clear', icon: '☀️', intensity: 0.3 });
+
+// ─── Title System ─────────────────────────────────────────────
+export interface TitleDef {
+  id: string;
+  name: string;
+  description: string;
+}
+export interface TitleState {
+  catalog: TitleDef[];
+  unlocked: string[];
+  active: string;
+}
+export const titleState = signal<TitleState>({ catalog: [], unlocked: [], active: '' });
+
+// ─── Pet State ───────────────────────────────────────────────
+export interface PetInfo {
+  id: string;
+  name: string;
+  pet_type: string;
+  icon: string;
+  level: number;
+  xp: number;
+  xp_to_next: number;
+  bonus_stat: string;
+  bonus_value: number;
+  rarity: number;
+}
+export interface PetState {
+  active: PetInfo | null;
+  collection: PetInfo[];
+}
+export const petState = signal<PetState>({ active: null, collection: [] });
+
+// ─── Auction House ──────────────────────────────────────────
+export interface AuctionItem {
+  id: string;
+  item: GameItem;
+  price: number;
+  seller: string;
+  timeLeft: number;
+}
+export interface AuctionState {
+  listings: AuctionItem[];
+  myListings: AuctionItem[];
+}
+export const auctionState = signal<AuctionState>({ listings: [], myListings: [] });
+
+// ─── Mount State ─────────────────────────────────────────────
+export interface MountState {
+  mounted: boolean;
+  mountName: string;
+  speedBonus: number;
+}
+export const mountState = signal<MountState>({ mounted: false, mountName: '', speedBonus: 0 });
+
+// ─── Mail State ──────────────────────────────────────────────
+export interface MailMessage {
+  id: string;
+  from: string;
+  subject: string;
+  body: string;
+  gold: number;
+  item: any;
+  read: boolean;
+  hasAttachment: boolean;
+}
+export const mailbox = signal<MailMessage[]>([]);
+
+// ─── Arena State ─────────────────────────────────────────────
+export interface ArenaState {
+  queued: boolean;
+  inMatch: boolean;
+  opponent: string;
+  opponentId: string;
+  rating: number;
+  wins: number;
+  losses: number;
+}
+export const arenaState = signal<ArenaState>({ queued: false, inMatch: false, opponent: '', opponentId: '', rating: 1000, wins: 0, losses: 0 });
+
+// ─── Daily Quest State ───────────────────────────────────────
+export interface DailyQuest {
+  questId: string;
+  title: string;
+  description: string;
+  objective: string;
+  target: number;
+  progress: number;
+  completed: boolean;
+  rewardXp: number;
+  rewardGold: number;
+}
+export const dailyQuests = signal<DailyQuest[]>([]);
+
+// ─── Blessings ───────────────────────────────────────────────
+export const blessings = signal<number>(0); // bitmask
+
+// ─── Stamina ─────────────────────────────────────────────────
+export const stamina = signal<number>(2520); // minutes
+
+// ─── Bestiary ────────────────────────────────────────────────
+export interface BestiaryEntry {
+  name: string;
+  kills: number;
+  tier: string;
+}
+export const bestiary = signal<BestiaryEntry[]>([]);
+
+// ─── Bounty ──────────────────────────────────────────────────
+export interface BountyEntry {
+  name: string;
+  bounty: number;
+  level: number;
+}
+export const bountyBoard = signal<BountyEntry[]>([]);
+export const myBounty = signal<number>(0);
 
 export function useSkill(slotIndex: number): void {
   const slots = hotbar.value;
@@ -536,6 +719,60 @@ export const commands = {
   },
   enchantItem(slotIndex: number, itemId: string): void {
     getNetwork().send(MessageType.EnchantItem, { slotIndex, itemId });
+  },
+  // Auction house
+  auctionList(slotIndex: number, price: number): void {
+    getNetwork().send(MessageType.AuctionAction, { action: 'list', slotIndex, price });
+  },
+  auctionBuy(listingId: string): void {
+    getNetwork().send(MessageType.AuctionAction, { action: 'buy', listingId });
+  },
+  auctionCancel(listingId: string): void {
+    getNetwork().send(MessageType.AuctionAction, { action: 'cancel', listingId });
+  },
+  auctionBrowse(category?: string): void {
+    getNetwork().send(MessageType.AuctionAction, { action: 'browse', category: category ?? 'all' });
+  },
+  // Mount system
+  mount(): void {
+    getNetwork().send(MessageType.MountAction, { action: 'mount' });
+  },
+  dismount(): void {
+    getNetwork().send(MessageType.MountAction, { action: 'dismount' });
+  },
+  toggleMount(): void {
+    if (mountState.value.mounted) {
+      getNetwork().send(MessageType.MountAction, { action: 'dismount' });
+    } else {
+      getNetwork().send(MessageType.MountAction, { action: 'mount' });
+    }
+  },
+  // Mail system
+  sendMail(to: string, subject: string, body: string, gold: number = 0, itemSlot?: number): void {
+    getNetwork().send(MessageType.MailAction, { action: 'send', to, subject, body, gold, itemSlot });
+  },
+  readMail(mailId: string): void {
+    getNetwork().send(MessageType.MailAction, { action: 'read', mailId });
+  },
+  claimMail(mailId: string): void {
+    getNetwork().send(MessageType.MailAction, { action: 'claim', mailId });
+  },
+  deleteMail(mailId: string): void {
+    getNetwork().send(MessageType.MailAction, { action: 'delete', mailId });
+  },
+  listMail(): void {
+    getNetwork().send(MessageType.MailAction, { action: 'list' });
+  },
+  // Arena
+  arenaQueue(): void {
+    getNetwork().send(MessageType.ArenaAction, { action: 'queue' });
+  },
+  arenaLeave(): void {
+    getNetwork().send(MessageType.ArenaAction, { action: 'leave' });
+  },
+  // Daily quests
+  claimDailyQuest(questId: string): void {
+    getNetwork().send(MessageType.DailyQuestClaim, { questId });
   },
 };
 

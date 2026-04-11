@@ -18,6 +18,8 @@ import {
   evictDistantChunks as evictRenderedChunks,
   renderChunkData,
   requestChunksAround as requestChunkWindow,
+  startWaterAnimation,
+  stopWaterAnimation,
 } from './game/chunkRendering';
 import {
   findEntityAtPosition,
@@ -53,6 +55,7 @@ import {
   showQuestPanel,
   entityTooltip,
   selectedTargetId,
+  commands,
 } from '../store/GameStore';
 import { InputGate } from '../services/InputGate';
 
@@ -199,6 +202,9 @@ export class GameScene extends Phaser.Scene {
     // Camera
     this.cameras.main.startFollow(this.playerSprite, true, 0.1, 0.1);
 
+    // Water shimmer animation
+    startWaterAnimation(this);
+
     // Minimap (top-right)
     this.minimap = new Minimap(this, this.scale.width - 150, 10);
 
@@ -268,6 +274,19 @@ export class GameScene extends Phaser.Scene {
     this.registerKeyboardShortcut('keydown-K', () => togglePanel('skilltree'));
     this.registerKeyboardShortcut('keydown-J', () => togglePanel('leaderboard'));
     this.registerKeyboardShortcut('keydown-U', () => togglePanel('enchant'));
+    this.registerKeyboardShortcut('keydown-F', () => togglePanel('fishing'));
+    this.registerKeyboardShortcut('keydown-R', () => togglePanel('factions'));
+    this.registerKeyboardShortcut('keydown-V', () => togglePanel('mining'));
+    this.registerKeyboardShortcut('keydown-T', () => togglePanel('pets'));
+    this.registerKeyboardShortcut('keydown-Z', () => togglePanel('mail'));
+    this.registerKeyboardShortcut('keydown-X', () => togglePanel('arena'));
+    this.registerKeyboardShortcut('keydown-COMMA', () => togglePanel('dailyquests'));
+    this.registerKeyboardShortcut('keydown-PERIOD', () => togglePanel('dungeonFinder'));
+    this.registerKeyboardShortcut('keydown-SEMICOLON', () => togglePanel('bestiary'));
+    this.registerKeyboardShortcut('keydown-QUOTES', () => togglePanel('blessings'));
+    this.registerKeyboardShortcut('keydown-OPEN_BRACKET', () => togglePanel('bounty'));
+    this.registerKeyboardShortcut('keydown-CLOSE_BRACKET', () => togglePanel('runes'));
+    this.registerKeyboardShortcut('keydown-M', () => commands.toggleMount());
     this.registerKeyboardShortcut('keydown-ESC', () => {
       closeAllPanels();
       showStatAllocation.value = false;
@@ -446,6 +465,7 @@ export class GameScene extends Phaser.Scene {
     this.entities.clear();
 
     this.clearGroundItems();
+    stopWaterAnimation();
     clearChunkTiles(this.chunkTiles, this.loadedChunks);
 
     this.townTouchpoints?.destroy();
@@ -724,6 +744,7 @@ export class GameScene extends Phaser.Scene {
         showEffectTick: (effectType, value) => this.showEffectTick(effectType, value),
         shakeCamera: (intensity, duration) => this.shakeCamera(intensity, duration),
         showHealNumber: (x, y, amount) => this.showHealNumber(x, y, amount),
+        showComboText: (x, y, combo) => this.showComboText(x, y, combo),
       },
     });
   }
@@ -966,6 +987,20 @@ export class GameScene extends Phaser.Scene {
     });
 
     this.spawnParticleBurst(x, y, 'particle_regen', ISOMETRIC_THEME.ui.accents.success, 4, 20, 600);
+  }
+
+  private showComboText(x: number, y: number, combo: number): void {
+    const color = combo >= 20 ? '#ff3333' : combo >= 10 ? '#ff8800' : combo >= 5 ? '#ffcc00' : '#ffffff';
+    const size = combo >= 10 ? '14px' : '11px';
+    const text = this.add.text(x, y, `${combo}x COMBO!`, {
+      fontSize: size, color, fontStyle: 'bold',
+      stroke: '#000', strokeThickness: 2,
+    }).setOrigin(0.5).setDepth(9999);
+
+    this.tweens.add({
+      targets: text, y: y - 15, alpha: 0, duration: 800,
+      ease: 'Power2', onComplete: () => text.destroy(),
+    });
   }
 
   private showLootPickupEffect(x: number, y: number, rarityColor: number): void {

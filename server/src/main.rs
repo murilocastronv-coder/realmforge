@@ -21,7 +21,7 @@ use tokio::sync::{broadcast, mpsc};
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use crate::enemy::{generate_enemy, update_enemy_ai};
+use crate::enemy::{generate_enemy, update_enemy_ai, compute_pack_aggro};
 use crate::protocol::*;
 use crate::world::WorldGenerator;
 
@@ -103,6 +103,10 @@ struct AppState {
     guild_names: DashMap<String, Uuid>,
     /// Pending guild invites: invited_player_id -> (guild_id, inviter_name, time)
     guild_invites: DashMap<Uuid, (Uuid, String, std::time::Instant)>,
+    /// Auction house listings: listing_id -> AuctionListing
+    auction_listings: DashMap<Uuid, AuctionListing>,
+    /// Active world event: (event_type, expire_tick)
+    active_world_event: std::sync::RwLock<Option<(&'static str, u64)>>,
 }
 
 impl AppState {
@@ -130,6 +134,8 @@ impl AppState {
             guilds: DashMap::new(),
             guild_names: DashMap::new(),
             guild_invites: DashMap::new(),
+            auction_listings: DashMap::new(),
+            active_world_event: std::sync::RwLock::new(None),
         }
     }
 
@@ -232,7 +238,8 @@ fn spawn_initial_enemies(state: &Arc<AppState>) {
         for cy in -6..=6_i32 {
             let spawns = state.world.get_enemy_spawns(cx, cy);
             for (x, y, zone_level) in spawns {
-                let enemy = generate_enemy(x, y, zone_level);
+                let biome = state.world.get_biome(x, y);
+                let enemy = generate_enemy(x, y, zone_level, biome);
                 state.enemies.insert(enemy.id, enemy);
             }
         }
@@ -507,6 +514,71 @@ async fn handle_message(
                 handle_enchant_item(state, pid, &msg.payload);
             }
         }
+        MSG_SET_TITLE => {
+            if let Some(pid) = player_id {
+                handle_set_title(state, pid, &msg.payload);
+            }
+        }
+        MSG_GATHER_ACTION => {
+            if let Some(pid) = player_id {
+                handle_gather_action(state, pid, &msg.payload);
+            }
+        }
+        MSG_LEADERBOARD_REQUEST => {
+            if let Some(pid) = player_id {
+                handle_leaderboard_request(state, pid);
+            }
+        }
+        MSG_PET_ACTION => {
+            if let Some(pid) = player_id {
+                handle_pet_action(state, pid, &msg.payload);
+            }
+        }
+        MSG_AUCTION_ACTION => {
+            if let Some(pid) = player_id {
+                handle_auction_action(state, pid, &msg.payload);
+            }
+        }
+        MSG_MOUNT_ACTION => {
+            if let Some(pid) = player_id {
+                handle_mount_action(state, pid, &msg.payload);
+            }
+        }
+        MSG_MAIL_ACTION => {
+            if let Some(pid) = player_id {
+                handle_mail_action(state, pid, &msg.payload);
+            }
+        }
+        MSG_ARENA_ACTION => {
+            if let Some(pid) = player_id {
+                handle_arena_action(state, pid, &msg.payload);
+            }
+        }
+        MSG_DAILY_QUEST_CLAIM => {
+            if let Some(pid) = player_id {
+                handle_daily_quest_claim(state, pid, &msg.payload);
+            }
+        }
+        MSG_BOUNTY_ACTION => {
+            if let Some(pid) = player_id {
+                handle_bounty_action(state, pid, &msg.payload);
+            }
+        }
+        MSG_RUNE_CRAFT => {
+            if let Some(pid) = player_id {
+                handle_rune_craft(state, pid, &msg.payload);
+            }
+        }
+        MSG_BUY_BLESSING => {
+            if let Some(pid) = player_id {
+                handle_buy_blessing(state, pid, &msg.payload);
+            }
+        }
+        MSG_BESTIARY_REQUEST => {
+            if let Some(pid) = player_id {
+                handle_bestiary_request(state, pid, &msg.payload);
+            }
+        }
         _ => {
             warn!("Unknown message type: {}", msg.msg_type);
         }
@@ -661,11 +733,90 @@ async fn handle_auth(
     send_bank_update(state, &pid);
     send_quest_update(state, pid);
 
+    // Run initial title check and send title data
+    if let Some(mut p) = state.players.get_mut(&pid) {
+        check_title_unlocks(&mut p);
+    }
+    send_title_update(state, &pid);
+
     // Send guild data if player is in a guild
     {
         let guild_id = state.players.get(&pid).and_then(|p| p.guild_id);
         if let Some(gid) = guild_id {
             send_guild_data_to_members(state, &gid);
+        }
+    }
+
+    // Daily login rewards
+    {
+        let today = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() / 86400; // day number since epoch
+        let today_u32 = today as u32;
+
+        let mut reward_msg = None;
+        if let Some(mut p) = state.players.get_mut(&pid) {
+            if p.last_login_day != today_u32 {
+                // Update streak
+                if p.last_login_day == today_u32 - 1 {
+                    p.login_streak += 1;
+                } else {
+                    p.login_streak = 1;
+                }
+                p.last_login_day = today_u32;
+                if p.login_streak > p.max_login_streak {
+                    p.max_login_streak = p.login_streak;
+                }
+
+                // Find reward for this streak day
+                let streak = p.login_streak;
+                let day_reward = protocol::DAILY_REWARDS
+                    .iter()
+                    .rev()
+                    .find(|(day, _, _, _)| streak >= *day);
+
+                if let Some((_, item_name, qty, gold)) = day_reward {
+                    p.gold += gold;
+                    // Add item reward
+                    if !item_name.is_empty() {
+                        let reward_item = protocol::Item {
+                            id: Uuid::new_v4().to_string(),
+                            template_id: item_name.to_string(),
+                            name: item_name.to_string(),
+                            rarity: 1,
+                            item_type: protocol::ItemType::Consumable,
+                            slot: None,
+                            stackable: true,
+                            quantity: *qty,
+                            level: 1,
+                            stats: std::collections::HashMap::new(),
+                            description: format!("Daily login reward item."),
+                            affixes: vec![],
+                            enchant_level: 0,
+                        };
+                        p.inventory.push(Some(reward_item));
+                    }
+                    reward_msg = Some(format!(
+                        "🎁 Daily Login Reward (Day {})! +{}g{}",
+                        streak, gold,
+                        if !item_name.is_empty() { format!(" + {}x {}", qty, item_name) } else { String::new() },
+                    ));
+                }
+            }
+        }
+        if let Some(msg_text) = reward_msg {
+            let chat_msg = json!({
+                "type": MSG_CHAT_MESSAGE,
+                "payload": {
+                    "sender": "System",
+                    "text": msg_text,
+                    "channel": "system"
+                }
+            }).to_string();
+            state.send_to(&pid, &chat_msg);
+            send_inventory_update(state, &pid);
+            send_stats_update_by_id(state, &pid);
         }
     }
 
@@ -828,11 +979,23 @@ fn handle_chat(state: &Arc<AppState>, player_id: Uuid, payload: &ChatPayload) {
                     state.send_to(&player_id, &msg);
                 }
                 "/trade" => {
-                    let msg = json!({
+                    // /trade <message> sends to trade channel
+                    if parts.len() < 2 {
+                        let msg = json!({
+                            "type": MSG_CHAT_MESSAGE,
+                            "payload": { "sender": "System", "text": "Usage: /trade <message>", "channel": "system" }
+                        }).to_string();
+                        state.send_to(&player_id, &msg);
+                        return;
+                    }
+                    let sender_name = state.players.get(&player_id)
+                        .map(|p| p.username.clone()).unwrap_or_default();
+                    let trade_text = parts[1..].join(" ");
+                    let trade_msg = json!({
                         "type": MSG_CHAT_MESSAGE,
-                        "payload": { "sender": "System", "text": "Trading is not yet implemented. Stay tuned!", "channel": "system" }
+                        "payload": { "sender": format!("[Trade] {}", sender_name), "text": trade_text, "channel": "trade" }
                     }).to_string();
-                    state.send_to(&player_id, &msg);
+                    state.broadcast(&trade_msg);
                 }
                 _ => {
                     let msg = json!({
@@ -852,28 +1015,76 @@ fn handle_chat(state: &Arc<AppState>, player_id: Uuid, payload: &ChatPayload) {
             channel: payload.channel.clone(),
         };
         let msg = json!({ "type": MSG_CHAT_MESSAGE, "payload": chat_msg }).to_string();
+        let px = player.x;
+        let py = player.y;
+        let guild_id = player.guild_id.clone();
+        let sender_name = player.username.clone();
+        drop(player);
 
         match payload.channel.as_str() {
             "global" => state.broadcast(&msg),
-            "local" => state.send_to_all_near(player.x, player.y, 30.0, &msg),
+            "local" => state.send_to_all_near(px, py, 30.0, &msg),
+            "trade" => {
+                // Trade channel: broadcast globally with [Trade] prefix
+                let trade_msg = json!({ "type": MSG_CHAT_MESSAGE, "payload": {
+                    "sender": format!("[Trade] {}", sender_name),
+                    "text": payload.text.clone(),
+                    "channel": "trade"
+                }}).to_string();
+                state.broadcast(&trade_msg);
+            }
+            "guild" => {
+                // Guild chat: send to guild members only
+                if let Some(gid) = guild_id {
+                    if let Some(guild) = state.guilds.get(&gid) {
+                        let guild_msg = json!({ "type": MSG_CHAT_MESSAGE, "payload": {
+                            "sender": format!("[Guild] {}", sender_name),
+                            "text": payload.text.clone(),
+                            "channel": "guild"
+                        }}).to_string();
+                        for member_id in &guild.members {
+                            state.send_to(member_id, &guild_msg);
+                        }
+                    }
+                }
+            }
             _ => state.broadcast(&msg),
         }
+        update_daily_quest_progress(state, &player_id, "send_chat", 1);
     }
 }
 
 // ─── Attack Handler (PvE) ────────────────────────────────────
 
 fn handle_attack(state: &Arc<AppState>, attacker_id: Uuid, target_id: Uuid) {
+    // Auto-dismount when attacking
+    auto_dismount_on_combat(state, &attacker_id);
+
     let attacker_stats = {
-        let player = match state.players.get(&attacker_id) {
+        let mut player = match state.players.get_mut(&attacker_id) {
             Some(p) => p,
             None => return,
         };
         if player.dead { return; }
-        (player.total_atk(), player.level, player.x, player.y, player.total_lck())
+        // Combo system: increment combo, reset timer
+        if player.combo_timer > 0.0 {
+            player.combo_count += 1;
+        } else {
+            player.combo_count = 1;
+        }
+        player.combo_timer = 60.0; // 3 seconds at 20 tps
+        let combo = player.combo_count;
+        (player.total_atk(), player.level, player.x, player.y, player.total_lck(), combo)
     };
 
-    let (atk, level, ax, ay, lck) = attacker_stats;
+    let (atk, level, ax, ay, lck, combo) = attacker_stats;
+    // Combo bonus: +2% damage per combo hit (caps at 25 combo = +50%)
+    let combo_mult = 1.0 + (combo.min(25) as f64 * 0.02);
+
+    // Daily quest: combo hits
+    if combo == 15 {
+        update_daily_quest_progress(state, &attacker_id, "combo_hits", 15);
+    }
 
     if let Some(mut enemy) = state.enemies.get_mut(&target_id) {
         // Guard: if enemy is already dead, skip (prevents double-kill race condition)
@@ -882,7 +1093,7 @@ fn handle_attack(state: &Arc<AppState>, attacker_id: Uuid, target_id: Uuid) {
         let dist = ((enemy.x - ax).powi(2) + (enemy.y - ay).powi(2)).sqrt();
         if dist > 3.0 { return; }
 
-        // Damage formula with crit
+        // Damage formula with crit + combo
         let mut rng = rand::thread_rng();
         let raw_damage = atk as f64 * (0.9 + rng.r#gen::<f64>() * 0.2);
         let def_reduction = enemy.def as f64 / (enemy.def as f64 + 100.0 + level as f64 * 2.0);
@@ -891,7 +1102,7 @@ fn handle_attack(state: &Arc<AppState>, attacker_id: Uuid, target_id: Uuid) {
         let is_crit = rng.r#gen::<f64>() < crit_chance;
         let crit_mult = if is_crit { 1.5 + lck as f64 * 0.005 } else { 1.0 };
 
-        let final_damage = (raw_damage * (1.0 - def_reduction) * crit_mult).max(1.0) as i32;
+        let final_damage = (raw_damage * (1.0 - def_reduction) * crit_mult * combo_mult).max(1.0) as i32;
         enemy.hp -= final_damage;
 
         let combat_msg = json!({
@@ -902,6 +1113,7 @@ fn handle_attack(state: &Arc<AppState>, attacker_id: Uuid, target_id: Uuid) {
                 "damage": final_damage,
                 "isCrit": is_crit,
                 "targetHp": enemy.hp.max(0),
+                "combo": combo,
             }
         }).to_string();
         state.send_to_all_near(enemy.x, enemy.y, 40.0, &combat_msg);
@@ -925,6 +1137,93 @@ fn handle_attack(state: &Arc<AppState>, attacker_id: Uuid, target_id: Uuid) {
                 _ => 0,
             };
             let loot = generate_loot(zone_level, enemy_level, lck + extra_luck);
+            
+            // Boss legendary drop chance
+            let mut boss_loot: Vec<protocol::Item> = Vec::new();
+            if matches!(enemy_rank, protocol::EnemyRank::Boss) {
+                let mut brng = rand::thread_rng();
+                if brng.gen_bool(0.25) {
+                    let eligible: Vec<_> = protocol::LEGENDARY_UNIQUES.iter()
+                        .filter(|(_, _, _, _, _, lvl, _)| *lvl <= enemy_level + 5)
+                        .collect();
+                    if !eligible.is_empty() {
+                        let pick = eligible[brng.gen_range(0..eligible.len())];
+                        let (name, slot, stat_key, stat_val, rarity, level, desc) = *pick;
+                        let mut stats = std::collections::HashMap::new();
+                        stats.insert(stat_key.to_string(), stat_val);
+                        boss_loot.push(protocol::Item {
+                            id: Uuid::new_v4().to_string(),
+                            template_id: name.to_lowercase().replace(' ', "_"),
+                            name: name.to_string(),
+                            rarity,
+                            item_type: if slot == "weapon" { protocol::ItemType::Weapon } else { protocol::ItemType::Armor },
+                            slot: Some(slot.to_string()),
+                            stackable: false,
+                            quantity: 1,
+                            level,
+                            stats,
+                            description: desc.to_string(),
+                            affixes: vec!["Legendary".to_string()],
+                            enchant_level: 0,
+                        });
+                    }
+                }
+                if brng.gen_bool(0.15) {
+                    let mounts = ["Riding Horse Whistle", "War Horse Whistle", "Griffin Feather"];
+                    let mount_name = mounts[brng.gen_range(0..mounts.len())];
+                    boss_loot.push(protocol::Item {
+                        id: Uuid::new_v4().to_string(),
+                        template_id: mount_name.to_lowercase().replace(' ', "_"),
+                        name: mount_name.to_string(),
+                        rarity: 3,
+                        item_type: protocol::ItemType::Consumable,
+                        slot: None,
+                        stackable: true,
+                        quantity: 1,
+                        level: 1,
+                        stats: std::collections::HashMap::new(),
+                        description: "A rare mount whistle. Use to gain speed!".to_string(),
+                        affixes: vec![],
+                        enchant_level: 0,
+                    });
+                }
+            }
+
+            // Dungeon-specific rare drops
+            let mut dungeon_loot: Vec<protocol::Item> = Vec::new();
+            if let Some((dung_name, _)) = state.world.get_dungeon_info(ex, ey) {
+                let mut drng = rand::thread_rng();
+                for &(dname, item_name, slot, stat_key, stat_val, rarity, req_level, desc, chance) in protocol::DUNGEON_LOOT {
+                    if dname != dung_name { continue; }
+                    // Higher rank enemies have better drop chances
+                    let rank_mult = match &enemy_rank {
+                        protocol::EnemyRank::Champion => 1.5,
+                        protocol::EnemyRank::Elite => 2.5,
+                        protocol::EnemyRank::Boss => 5.0,
+                        _ => 1.0,
+                    };
+                    if drng.gen_bool((chance * rank_mult).min(1.0)) {
+                        let mut stats = std::collections::HashMap::new();
+                        stats.insert(stat_key.to_string(), stat_val);
+                        dungeon_loot.push(protocol::Item {
+                            id: Uuid::new_v4().to_string(),
+                            template_id: item_name.to_lowercase().replace(' ', "_"),
+                            name: item_name.to_string(),
+                            rarity,
+                            item_type: if slot == "weapon" { protocol::ItemType::Weapon } else { protocol::ItemType::Armor },
+                            slot: Some(slot.to_string()),
+                            stackable: false,
+                            quantity: 1,
+                            level: req_level,
+                            stats,
+                            description: desc.to_string(),
+                            affixes: vec![format!("{} Drop", dung_name)],
+                            enchant_level: 0,
+                        });
+                    }
+                }
+            }
+
             let gold_mult = match &enemy_rank {
                 protocol::EnemyRank::Champion => 2.0,
                 protocol::EnemyRank::Elite => 5.0,
@@ -947,43 +1246,172 @@ fn handle_attack(state: &Arc<AppState>, attacker_id: Uuid, target_id: Uuid) {
                 };
                 state.ground_items.insert(ground_item.id, ground_item);
             }
+            // Drop boss legendary loot
+            for item in &boss_loot {
+                let ground_item = GroundItem {
+                    id: Uuid::new_v4(),
+                    item: item.clone(),
+                    x: ex + rng.gen_range(-0.5..0.5),
+                    y: ey + rng.gen_range(-0.5..0.5),
+                    owner_id: Some(attacker_id),
+                    drop_time: tick,
+                    protection_duration: 1200.0, // 60 seconds protection for legendaries
+                };
+                state.ground_items.insert(ground_item.id, ground_item);
+            }
+            // Drop dungeon-specific loot
+            for item in &dungeon_loot {
+                let ground_item = GroundItem {
+                    id: Uuid::new_v4(),
+                    item: item.clone(),
+                    x: ex + rng.gen_range(-0.5..0.5),
+                    y: ey + rng.gen_range(-0.5..0.5),
+                    owner_id: Some(attacker_id),
+                    drop_time: tick,
+                    protection_duration: 900.0, // 45 seconds protection
+                };
+                state.ground_items.insert(ground_item.id, ground_item);
+            }
 
-            // Award XP and gold + update stats tracker
-            if let Some(mut player) = state.players.get_mut(&attacker_id) {
-                player.xp += xp_reward;
-                player.gold += gold;
-                // Stats tracking
-                player.stats_tracker.enemies_killed += 1;
-                player.stats_tracker.gold_earned += gold;
-                let name_lower = enemy_name.to_lowercase();
-                *player.stats_tracker.enemies_killed_by_type.entry(name_lower).or_insert(0) += 1;
-                match &enemy_rank {
-                    protocol::EnemyRank::Boss => player.stats_tracker.boss_kills += 1,
-                    protocol::EnemyRank::Elite => player.stats_tracker.elite_kills += 1,
-                    protocol::EnemyRank::Champion => player.stats_tracker.champion_kills += 1,
-                    _ => {}
+            // Award XP and gold — shared with nearby party members
+            let party_share_range = 20.0_f64;
+            let mut xp_recipients: Vec<(Uuid, u64, u64)> = Vec::new(); // (id, xp, gold)
+            
+            // Check if attacker is in a party
+            let party_members_nearby: Vec<Uuid> = if let Some(party_id) = state.player_party.get(&attacker_id) {
+                let pid = *party_id.value();
+                drop(party_id);
+                if let Some(members) = state.parties.get(&pid) {
+                    members.iter().filter(|mid| {
+                        if **mid == attacker_id { return true; }
+                        // Check if member is nearby
+                        if let Some(p) = state.players.get(mid) {
+                            let dx = p.x - ex;
+                            let dy = p.y - ey;
+                            (dx * dx + dy * dy).sqrt() < party_share_range && !p.dead
+                        } else { false }
+                    }).copied().collect()
+                } else { vec![attacker_id] }
+            } else { vec![attacker_id] };
+
+            let share_count = party_members_nearby.len().max(1) as u64;
+            // Bonus XP for party play: 10% per extra member
+            let party_xp_bonus = 1.0 + (share_count - 1) as f64 * 0.10;
+            
+            // World event multipliers
+            let (xp_mult, gold_mult_event) = {
+                let we = state.active_world_event.read().unwrap_or_else(|e| e.into_inner());
+                let current_tick = state.tick_count.load(std::sync::atomic::Ordering::Relaxed);
+                match *we {
+                    Some((evt, expire)) if current_tick < expire => match evt {
+                        "double_xp" => (2.0, 1.0),
+                        "gold_rush" => (1.0, 2.0),
+                        "lucky_hour" => (1.2, 1.2),
+                        "elemental_surge" => (1.0, 1.5),
+                        "star_blessing" => (1.5, 1.5),
+                        "blood_moon" => (3.0, 1.0),
+                        "treasure_rain" => (1.0, 2.5),
+                        _ => (1.0, 1.0),
+                    },
+                    _ => (1.0, 1.0),
                 }
-                if final_damage > player.stats_tracker.highest_hit {
-                    player.stats_tracker.highest_hit = final_damage;
+            };
+            
+            let total_xp = (xp_reward as f64 * party_xp_bonus * xp_mult) as u64;
+            let total_gold = (gold as f64 * gold_mult_event) as u64;
+            let xp_per_member = total_xp / share_count;
+            let gold_per_member = total_gold / share_count;
+
+            for mid in &party_members_nearby {
+                xp_recipients.push((*mid, xp_per_member, gold_per_member));
+            }
+
+            for (pid, xp_share, gold_share) in &xp_recipients {
+                if let Some(mut player) = state.players.get_mut(pid) {
+                    // Stamina XP multiplier (per-recipient)
+                    let stamina_mult = if player.stamina_minutes > 2400 {
+                        1.5
+                    } else if player.stamina_minutes >= 840 {
+                        1.0
+                    } else {
+                        0.5
+                    };
+                    let stamina_xp = (*xp_share as f64 * stamina_mult) as u64;
+                    player.xp += stamina_xp;
+                    player.gold += gold_share;
+
+                    // Bestiary tracking for killer
+                    if *pid == attacker_id {
+                        *player.bestiary.entry(enemy_name.clone()).or_insert(0) += 1;
+                        // Stats tracking only for killer
+                        player.stats_tracker.enemies_killed += 1;
+                        player.stats_tracker.gold_earned += gold;
+                        let name_lower = enemy_name.to_lowercase();
+                        *player.stats_tracker.enemies_killed_by_type.entry(name_lower).or_insert(0) += 1;
+                        match &enemy_rank {
+                            protocol::EnemyRank::Boss => {
+                                player.stats_tracker.boss_kills += 1;
+                                player.bosses_killed += 1;
+                            }
+                            protocol::EnemyRank::Elite => player.stats_tracker.elite_kills += 1,
+                            protocol::EnemyRank::Champion => player.stats_tracker.champion_kills += 1,
+                            _ => {}
+                        }
+                        if final_damage > player.stats_tracker.highest_hit {
+                            player.stats_tracker.highest_hit = final_damage;
+                        }
+                    }
+
+                    check_and_apply_level_up(&mut player, state);
+                    let new_titles = check_title_unlocks(&mut player);
+                    send_stats_update(state, &player);
+                    let member_id = player.id;
+                    drop(player);
+
+                    if !new_titles.is_empty() {
+                        send_title_update(state, &member_id);
+                        for t in &new_titles {
+                            if let Some((_, display, _)) = protocol::TITLES.iter().find(|(id, _, _)| id == t) {
+                                let msg = json!({"type": MSG_CHAT_MESSAGE, "payload": {"sender":"System","text": format!("🏆 Title unlocked: {}!", display),"channel":"system"}}).to_string();
+                                state.send_to(&member_id, &msg);
+                            }
+                        }
+                    }
+
+                    // Notify party members about shared XP
+                    if *pid != attacker_id {
+                        let share_msg = json!({
+                            "type": MSG_CHAT_MESSAGE,
+                            "payload": {
+                                "sender": "System",
+                                "text": format!("Party member killed {}! (+{} XP, +{}g shared)", enemy_name, xp_share, gold_share),
+                                "channel": "system"
+                            }
+                        }).to_string();
+                        state.send_to(pid, &share_msg);
+                    }
                 }
-
-                // Check level up (centralized)
-                check_and_apply_level_up(&mut player, state);
-
-                send_stats_update(state, &player);
             }
 
             // Notify about kill and loot
             let loot_names: Vec<String> = loot.iter().map(|i| i.name.clone()).collect();
+            let shared_text = if share_count > 1 { format!(" (shared with {} members)", share_count) } else { String::new() };
             let kill_msg = json!({
                 "type": MSG_CHAT_MESSAGE,
                 "payload": {
                     "sender": "System",
-                    "text": format!("You defeated {}! (+{} XP, +{}g) Loot: {}", enemy_name, xp_reward, gold, loot_names.join(", ")),
+                    "text": format!("You defeated {}! (+{} XP, +{}g){} Loot: {}", enemy_name, xp_per_member, gold_per_member, shared_text, loot_names.join(", ")),
                     "channel": "combat"
                 }
             }).to_string();
             state.send_to(&attacker_id, &kill_msg);
+
+            // Daily quest progress: kill enemies
+            update_daily_quest_progress(state, &attacker_id, "kill_enemies", 1);
+            if matches!(enemy_rank, protocol::EnemyRank::Boss) {
+                update_daily_quest_progress(state, &attacker_id, "kill_boss", 1);
+            }
+            update_daily_quest_progress(state, &attacker_id, "earn_gold", gold_per_member as u32);
 
             // Notify nearby about ground items
             broadcast_ground_items(state, ex, ey);
@@ -1015,6 +1443,23 @@ fn handle_attack(state: &Arc<AppState>, attacker_id: Uuid, target_id: Uuid) {
             check_quest_progress(state, attacker_id, "gold", "", 0);
             check_quest_progress(state, attacker_id, "level", "", 0);
             check_achievements(state, attacker_id);
+
+            // Faction reputation for kills
+            {
+                let rep_gain = match &enemy_rank {
+                    protocol::EnemyRank::Boss => 50,
+                    protocol::EnemyRank::Elite => 20,
+                    protocol::EnemyRank::Champion => 10,
+                    protocol::EnemyRank::Normal => 2,
+                };
+                // Wild Hunters gain rep on any kill, Starfall Guard on boss kills
+                if let Some(mut p) = state.players.get_mut(&attacker_id) {
+                    *p.faction_rep.entry("wild_hunters".to_string()).or_insert(0) += rep_gain;
+                    if matches!(enemy_rank, protocol::EnemyRank::Boss | protocol::EnemyRank::Elite) {
+                        *p.faction_rep.entry("starfall_guard".to_string()).or_insert(0) += rep_gain * 2;
+                    }
+                }
+            }
         }
     }
 }
@@ -1032,41 +1477,116 @@ struct SkillDef {
     aoe_radius: f64,
     class: &'static str,
     heal_amount: f64,  // 0 = no heal, fraction of max_hp for heals
+    // CC / status effect on hit
+    effect: Option<(&'static str, i32, u32)>, // (effect_type, value, duration_ticks)
 }
 
 const SKILLS: &[SkillDef] = &[
     // Warrior skills
-    SkillDef { id: "slash",        name: "Slash",         mana_cost: 5,  cooldown_ticks: 20,  damage_mult: 1.5,  range: 3.0, is_aoe: false, aoe_radius: 0.0, class: "warrior", heal_amount: 0.0 },
-    SkillDef { id: "shield_bash",  name: "Shield Bash",   mana_cost: 12, cooldown_ticks: 60,  damage_mult: 1.2,  range: 2.5, is_aoe: false, aoe_radius: 0.0, class: "warrior", heal_amount: 0.0 },
-    SkillDef { id: "whirlwind",    name: "Whirlwind",     mana_cost: 20, cooldown_ticks: 100, damage_mult: 1.0,  range: 3.5, is_aoe: true,  aoe_radius: 4.0, class: "warrior", heal_amount: 0.0 },
-    SkillDef { id: "battle_cry",   name: "Battle Cry",    mana_cost: 15, cooldown_ticks: 200, damage_mult: 0.0,  range: 0.0, is_aoe: false, aoe_radius: 0.0, class: "warrior", heal_amount: 0.15 },
-    SkillDef { id: "execute",      name: "Execute",       mana_cost: 25, cooldown_ticks: 120, damage_mult: 3.0,  range: 2.5, is_aoe: false, aoe_radius: 0.0, class: "warrior", heal_amount: 0.0 },
-    SkillDef { id: "taunt",        name: "Taunt",         mana_cost: 8,  cooldown_ticks: 80,  damage_mult: 0.2,  range: 5.0, is_aoe: true,  aoe_radius: 5.0, class: "warrior", heal_amount: 0.0 },
+    SkillDef { id: "slash",        name: "Slash",         mana_cost: 5,  cooldown_ticks: 20,  damage_mult: 1.5,  range: 3.0, is_aoe: false, aoe_radius: 0.0, class: "warrior", heal_amount: 0.0, effect: None },
+    SkillDef { id: "shield_bash",  name: "Shield Bash",   mana_cost: 12, cooldown_ticks: 60,  damage_mult: 1.2,  range: 2.5, is_aoe: false, aoe_radius: 0.0, class: "warrior", heal_amount: 0.0, effect: Some(("stun", 0, 40)) },
+    SkillDef { id: "whirlwind",    name: "Whirlwind",     mana_cost: 20, cooldown_ticks: 100, damage_mult: 1.0,  range: 3.5, is_aoe: true,  aoe_radius: 4.0, class: "warrior", heal_amount: 0.0, effect: None },
+    SkillDef { id: "battle_cry",   name: "Battle Cry",    mana_cost: 15, cooldown_ticks: 200, damage_mult: 0.0,  range: 0.0, is_aoe: false, aoe_radius: 0.0, class: "warrior", heal_amount: 0.15, effect: None },
+    SkillDef { id: "execute",      name: "Execute",       mana_cost: 25, cooldown_ticks: 120, damage_mult: 3.0,  range: 2.5, is_aoe: false, aoe_radius: 0.0, class: "warrior", heal_amount: 0.0, effect: Some(("bleed", 5, 100)) },
+    SkillDef { id: "taunt",        name: "Taunt",         mana_cost: 8,  cooldown_ticks: 80,  damage_mult: 0.2,  range: 5.0, is_aoe: true,  aoe_radius: 5.0, class: "warrior", heal_amount: 0.0, effect: Some(("weakness", 5, 80)) },
     // Mage skills
-    SkillDef { id: "fireball",     name: "Fireball",      mana_cost: 15, cooldown_ticks: 30,  damage_mult: 2.0,  range: 8.0, is_aoe: false, aoe_radius: 0.0, class: "mage", heal_amount: 0.0 },
-    SkillDef { id: "ice_shard",    name: "Ice Shard",     mana_cost: 10, cooldown_ticks: 20,  damage_mult: 1.3,  range: 7.0, is_aoe: false, aoe_radius: 0.0, class: "mage", heal_amount: 0.0 },
-    SkillDef { id: "lightning",    name: "Lightning Bolt", mana_cost: 25, cooldown_ticks: 60,  damage_mult: 2.5,  range: 9.0, is_aoe: false, aoe_radius: 0.0, class: "mage", heal_amount: 0.0 },
-    SkillDef { id: "blizzard",     name: "Blizzard",      mana_cost: 35, cooldown_ticks: 120, damage_mult: 1.5,  range: 7.0, is_aoe: true,  aoe_radius: 5.0, class: "mage", heal_amount: 0.0 },
-    SkillDef { id: "arcane_shield",name: "Arcane Shield",  mana_cost: 20, cooldown_ticks: 200, damage_mult: 0.0,  range: 0.0, is_aoe: false, aoe_radius: 0.0, class: "mage", heal_amount: 0.2 },
-    SkillDef { id: "meteor",       name: "Meteor",        mana_cost: 50, cooldown_ticks: 200, damage_mult: 4.0,  range: 8.0, is_aoe: true,  aoe_radius: 6.0, class: "mage", heal_amount: 0.0 },
+    SkillDef { id: "fireball",     name: "Fireball",      mana_cost: 15, cooldown_ticks: 30,  damage_mult: 2.0,  range: 8.0, is_aoe: false, aoe_radius: 0.0, class: "mage", heal_amount: 0.0, effect: Some(("burn", 8, 80)) },
+    SkillDef { id: "ice_shard",    name: "Ice Shard",     mana_cost: 10, cooldown_ticks: 20,  damage_mult: 1.3,  range: 7.0, is_aoe: false, aoe_radius: 0.0, class: "mage", heal_amount: 0.0, effect: Some(("freeze", 0, 40)) },
+    SkillDef { id: "lightning",    name: "Lightning Bolt", mana_cost: 25, cooldown_ticks: 60,  damage_mult: 2.5,  range: 9.0, is_aoe: false, aoe_radius: 0.0, class: "mage", heal_amount: 0.0, effect: Some(("stun", 0, 20)) },
+    SkillDef { id: "blizzard",     name: "Blizzard",      mana_cost: 35, cooldown_ticks: 120, damage_mult: 1.5,  range: 7.0, is_aoe: true,  aoe_radius: 5.0, class: "mage", heal_amount: 0.0, effect: Some(("freeze", 0, 60)) },
+    SkillDef { id: "arcane_shield",name: "Arcane Shield",  mana_cost: 20, cooldown_ticks: 200, damage_mult: 0.0,  range: 0.0, is_aoe: false, aoe_radius: 0.0, class: "mage", heal_amount: 0.2, effect: None },
+    SkillDef { id: "meteor",       name: "Meteor",        mana_cost: 50, cooldown_ticks: 200, damage_mult: 4.0,  range: 8.0, is_aoe: true,  aoe_radius: 6.0, class: "mage", heal_amount: 0.0, effect: Some(("burn", 12, 100)) },
     // Rogue skills
-    SkillDef { id: "backstab",     name: "Backstab",      mana_cost: 10, cooldown_ticks: 25,  damage_mult: 2.2,  range: 2.5, is_aoe: false, aoe_radius: 0.0, class: "rogue", heal_amount: 0.0 },
-    SkillDef { id: "poison_strike",name: "Poison Strike",  mana_cost: 12, cooldown_ticks: 40,  damage_mult: 1.3,  range: 2.5, is_aoe: false, aoe_radius: 0.0, class: "rogue", heal_amount: 0.0 },
-    SkillDef { id: "fan_of_knives",name: "Fan of Knives",  mana_cost: 20, cooldown_ticks: 80,  damage_mult: 1.0,  range: 4.0, is_aoe: true,  aoe_radius: 4.0, class: "rogue", heal_amount: 0.0 },
-    SkillDef { id: "shadow_step",  name: "Shadow Step",   mana_cost: 15, cooldown_ticks: 100, damage_mult: 0.0,  range: 0.0, is_aoe: false, aoe_radius: 0.0, class: "rogue", heal_amount: 0.1 },
-    SkillDef { id: "eviscerate",   name: "Eviscerate",    mana_cost: 30, cooldown_ticks: 120, damage_mult: 3.5,  range: 2.5, is_aoe: false, aoe_radius: 0.0, class: "rogue", heal_amount: 0.0 },
-    SkillDef { id: "smoke_bomb",   name: "Smoke Bomb",    mana_cost: 18, cooldown_ticks: 160, damage_mult: 0.3,  range: 3.0, is_aoe: true,  aoe_radius: 4.0, class: "rogue", heal_amount: 0.0 },
+    SkillDef { id: "backstab",     name: "Backstab",      mana_cost: 10, cooldown_ticks: 25,  damage_mult: 2.2,  range: 2.5, is_aoe: false, aoe_radius: 0.0, class: "rogue", heal_amount: 0.0, effect: Some(("bleed", 6, 80)) },
+    SkillDef { id: "poison_strike",name: "Poison Strike",  mana_cost: 12, cooldown_ticks: 40,  damage_mult: 1.3,  range: 2.5, is_aoe: false, aoe_radius: 0.0, class: "rogue", heal_amount: 0.0, effect: Some(("poison", 4, 100)) },
+    SkillDef { id: "fan_of_knives",name: "Fan of Knives",  mana_cost: 20, cooldown_ticks: 80,  damage_mult: 1.0,  range: 4.0, is_aoe: true,  aoe_radius: 4.0, class: "rogue", heal_amount: 0.0, effect: Some(("bleed", 3, 60)) },
+    SkillDef { id: "shadow_step",  name: "Shadow Step",   mana_cost: 15, cooldown_ticks: 100, damage_mult: 0.0,  range: 0.0, is_aoe: false, aoe_radius: 0.0, class: "rogue", heal_amount: 0.1, effect: None },
+    SkillDef { id: "eviscerate",   name: "Eviscerate",    mana_cost: 30, cooldown_ticks: 120, damage_mult: 3.5,  range: 2.5, is_aoe: false, aoe_radius: 0.0, class: "rogue", heal_amount: 0.0, effect: Some(("armor_break", 10, 100)) },
+    SkillDef { id: "smoke_bomb",   name: "Smoke Bomb",    mana_cost: 18, cooldown_ticks: 160, damage_mult: 0.3,  range: 3.0, is_aoe: true,  aoe_radius: 4.0, class: "rogue", heal_amount: 0.0, effect: Some(("weakness", 8, 80)) },
     // Ranger skills
-    SkillDef { id: "power_shot",   name: "Power Shot",    mana_cost: 10, cooldown_ticks: 25,  damage_mult: 1.8,  range: 10.0, is_aoe: false, aoe_radius: 0.0, class: "ranger", heal_amount: 0.0 },
-    SkillDef { id: "multi_shot",   name: "Multi Shot",    mana_cost: 18, cooldown_ticks: 60,  damage_mult: 1.0,  range: 8.0,  is_aoe: true,  aoe_radius: 5.0, class: "ranger", heal_amount: 0.0 },
-    SkillDef { id: "trap",         name: "Bear Trap",     mana_cost: 15, cooldown_ticks: 100, damage_mult: 1.5,  range: 6.0,  is_aoe: false, aoe_radius: 0.0, class: "ranger", heal_amount: 0.0 },
-    SkillDef { id: "heal_arrow",   name: "Heal Arrow",    mana_cost: 20, cooldown_ticks: 120, damage_mult: 0.0,  range: 0.0,  is_aoe: false, aoe_radius: 0.0, class: "ranger", heal_amount: 0.2 },
-    SkillDef { id: "rain_arrows",  name: "Rain of Arrows", mana_cost: 35, cooldown_ticks: 160, damage_mult: 1.2,  range: 9.0, is_aoe: true,  aoe_radius: 6.0, class: "ranger", heal_amount: 0.0 },
-    SkillDef { id: "eagle_eye",    name: "Eagle Eye",     mana_cost: 12, cooldown_ticks: 200, damage_mult: 4.0,  range: 12.0, is_aoe: false, aoe_radius: 0.0, class: "ranger", heal_amount: 0.0 },
+    SkillDef { id: "power_shot",   name: "Power Shot",    mana_cost: 10, cooldown_ticks: 25,  damage_mult: 1.8,  range: 10.0, is_aoe: false, aoe_radius: 0.0, class: "ranger", heal_amount: 0.0, effect: None },
+    SkillDef { id: "multi_shot",   name: "Multi Shot",    mana_cost: 18, cooldown_ticks: 60,  damage_mult: 1.0,  range: 8.0,  is_aoe: true,  aoe_radius: 5.0, class: "ranger", heal_amount: 0.0, effect: None },
+    SkillDef { id: "trap",         name: "Bear Trap",     mana_cost: 15, cooldown_ticks: 100, damage_mult: 1.5,  range: 6.0,  is_aoe: false, aoe_radius: 0.0, class: "ranger", heal_amount: 0.0, effect: Some(("stun", 0, 60)) },
+    SkillDef { id: "heal_arrow",   name: "Heal Arrow",    mana_cost: 20, cooldown_ticks: 120, damage_mult: 0.0,  range: 0.0,  is_aoe: false, aoe_radius: 0.0, class: "ranger", heal_amount: 0.2, effect: None },
+    SkillDef { id: "rain_arrows",  name: "Rain of Arrows", mana_cost: 35, cooldown_ticks: 160, damage_mult: 1.2,  range: 9.0, is_aoe: true,  aoe_radius: 6.0, class: "ranger", heal_amount: 0.0, effect: Some(("bleed", 4, 60)) },
+    SkillDef { id: "eagle_eye",    name: "Eagle Eye",     mana_cost: 12, cooldown_ticks: 200, damage_mult: 4.0,  range: 12.0, is_aoe: false, aoe_radius: 0.0, class: "ranger", heal_amount: 0.0, effect: None },
+    // Warrior advanced
+    SkillDef { id: "berserk",       name: "Berserk",        mana_cost: 30, cooldown_ticks: 200, damage_mult: 2.5,  range: 2.5,  is_aoe: false, aoe_radius: 0.0, class: "warrior", heal_amount: 0.0, effect: None },
+    SkillDef { id: "ground_slam",   name: "Ground Slam",    mana_cost: 25, cooldown_ticks: 100, damage_mult: 1.8,  range: 4.0,  is_aoe: true,  aoe_radius: 4.0, class: "warrior", heal_amount: 0.0, effect: Some(("stun", 0, 30)) },
+    SkillDef { id: "fortify",       name: "Fortify",        mana_cost: 15, cooldown_ticks: 160, damage_mult: 0.0,  range: 0.0,  is_aoe: false, aoe_radius: 0.0, class: "warrior", heal_amount: 0.15, effect: None },
+    // Mage advanced
+    SkillDef { id: "chain_lightning", name: "Chain Lightning", mana_cost: 30, cooldown_ticks: 80, damage_mult: 1.6, range: 8.0, is_aoe: true,  aoe_radius: 5.0, class: "mage", heal_amount: 0.0, effect: Some(("stun", 0, 15)) },
+    SkillDef { id: "mana_shield",    name: "Mana Shield",     mana_cost: 40, cooldown_ticks: 200, damage_mult: 0.0, range: 0.0, is_aoe: false, aoe_radius: 0.0, class: "mage", heal_amount: 0.25, effect: None },
+    SkillDef { id: "fire_wall",      name: "Fire Wall",       mana_cost: 35, cooldown_ticks: 120, damage_mult: 2.0, range: 7.0, is_aoe: true,  aoe_radius: 5.0, class: "mage", heal_amount: 0.0, effect: Some(("burn", 10, 120)) },
+    // Rogue advanced
+    SkillDef { id: "assassinate",    name: "Assassinate",     mana_cost: 40, cooldown_ticks: 160, damage_mult: 4.0, range: 2.5, is_aoe: false, aoe_radius: 0.0, class: "rogue", heal_amount: 0.0, effect: Some(("bleed", 10, 100)) },
+    SkillDef { id: "blade_dance",    name: "Blade Dance",     mana_cost: 25, cooldown_ticks: 80,  damage_mult: 1.5, range: 3.0, is_aoe: true,  aoe_radius: 3.5, class: "rogue", heal_amount: 0.0, effect: Some(("bleed", 5, 60)) },
+    SkillDef { id: "vanish",         name: "Vanish",          mana_cost: 30, cooldown_ticks: 200, damage_mult: 0.0, range: 0.0, is_aoe: false, aoe_radius: 0.0, class: "rogue", heal_amount: 0.1, effect: None },
+    // Ranger advanced
+    SkillDef { id: "piercing_shot",  name: "Piercing Shot",   mana_cost: 20, cooldown_ticks: 60,  damage_mult: 2.5, range: 10.0, is_aoe: false, aoe_radius: 0.0, class: "ranger", heal_amount: 0.0, effect: Some(("armor_break", 8, 80)) },
+    SkillDef { id: "nature_call",    name: "Nature's Call",   mana_cost: 35, cooldown_ticks: 160, damage_mult: 0.0, range: 0.0,  is_aoe: false, aoe_radius: 0.0, class: "ranger", heal_amount: 0.3, effect: None },
+    SkillDef { id: "barrage",        name: "Barrage",         mana_cost: 45, cooldown_ticks: 140, damage_mult: 1.4, range: 8.0,  is_aoe: true,  aoe_radius: 5.0, class: "ranger", heal_amount: 0.0, effect: Some(("poison", 3, 80)) },
+    // ─── Ultimate Abilities (high cost, high cooldown, devastating) ───
+    SkillDef { id: "avatar_of_war",   name: "Avatar of War",     mana_cost: 80, cooldown_ticks: 600, damage_mult: 5.0,  range: 4.0,  is_aoe: true,  aoe_radius: 5.0, class: "warrior", heal_amount: 0.2, effect: Some(("stun", 0, 60)) },
+    SkillDef { id: "apocalypse",      name: "Apocalypse",        mana_cost: 100, cooldown_ticks: 600, damage_mult: 6.0, range: 10.0, is_aoe: true,  aoe_radius: 8.0, class: "mage", heal_amount: 0.0, effect: Some(("burn", 15, 120)) },
+    SkillDef { id: "death_sentence",  name: "Death Sentence",    mana_cost: 70, cooldown_ticks: 600, damage_mult: 8.0,  range: 2.5,  is_aoe: false, aoe_radius: 0.0, class: "rogue", heal_amount: 0.0, effect: Some(("poison", 20, 200)) },
+    SkillDef { id: "arrow_storm",     name: "Arrow Storm",       mana_cost: 75, cooldown_ticks: 600, damage_mult: 3.0,  range: 12.0, is_aoe: true,  aoe_radius: 8.0, class: "ranger", heal_amount: 0.0, effect: Some(("bleed", 8, 100)) },
+    // ─── Warrior Tier 3 ───
+    SkillDef { id: "enrage",          name: "Enrage",            mana_cost: 20, cooldown_ticks: 240, damage_mult: 0.0,  range: 0.0,  is_aoe: false, aoe_radius: 0.0, class: "warrior", heal_amount: 0.0, effect: Some(("buff_atk", 20, 200)) },
+    SkillDef { id: "charge",          name: "Charge",            mana_cost: 15, cooldown_ticks: 100, damage_mult: 2.0,  range: 8.0,  is_aoe: false, aoe_radius: 0.0, class: "warrior", heal_amount: 0.0, effect: Some(("stun", 0, 30)) },
+    SkillDef { id: "iron_will",       name: "Iron Will",         mana_cost: 25, cooldown_ticks: 300, damage_mult: 0.0,  range: 0.0,  is_aoe: false, aoe_radius: 0.0, class: "warrior", heal_amount: 0.3, effect: None },
+    // ─── Mage Tier 3 ───
+    SkillDef { id: "frost_nova",      name: "Frost Nova",        mana_cost: 30, cooldown_ticks: 80,  damage_mult: 1.5,  range: 4.0,  is_aoe: true,  aoe_radius: 5.0, class: "mage", heal_amount: 0.0, effect: Some(("freeze", 0, 50)) },
+    SkillDef { id: "arcane_missiles", name: "Arcane Missiles",   mana_cost: 22, cooldown_ticks: 40,  damage_mult: 1.8,  range: 8.0,  is_aoe: false, aoe_radius: 0.0, class: "mage", heal_amount: 0.0, effect: None },
+    SkillDef { id: "polymorph",       name: "Polymorph",         mana_cost: 40, cooldown_ticks: 200, damage_mult: 0.0,  range: 6.0,  is_aoe: false, aoe_radius: 0.0, class: "mage", heal_amount: 0.0, effect: Some(("stun", 0, 80)) },
+    SkillDef { id: "time_warp",       name: "Time Warp",         mana_cost: 60, cooldown_ticks: 400, damage_mult: 0.0,  range: 0.0,  is_aoe: false, aoe_radius: 0.0, class: "mage", heal_amount: 0.0, effect: Some(("buff_spd", 15, 200)) },
+    // ─── Rogue Tier 3 ───
+    SkillDef { id: "ambush",          name: "Ambush",            mana_cost: 20, cooldown_ticks: 60,  damage_mult: 3.0,  range: 3.0,  is_aoe: false, aoe_radius: 0.0, class: "rogue", heal_amount: 0.0, effect: Some(("stun", 0, 20)) },
+    SkillDef { id: "crippling_strike",name: "Crippling Strike",  mana_cost: 15, cooldown_ticks: 50,  damage_mult: 1.6,  range: 2.5,  is_aoe: false, aoe_radius: 0.0, class: "rogue", heal_amount: 0.0, effect: Some(("slow", 10, 120)) },
+    SkillDef { id: "shadow_cloak",    name: "Shadow Cloak",      mana_cost: 35, cooldown_ticks: 240, damage_mult: 0.0,  range: 0.0,  is_aoe: false, aoe_radius: 0.0, class: "rogue", heal_amount: 0.15, effect: Some(("buff_spd", 10, 160)) },
+    SkillDef { id: "venom_splash",    name: "Venom Splash",      mana_cost: 25, cooldown_ticks: 80,  damage_mult: 1.2,  range: 4.0,  is_aoe: true,  aoe_radius: 4.0, class: "rogue", heal_amount: 0.0, effect: Some(("poison", 8, 120)) },
+    // ─── Ranger Tier 3 ───
+    SkillDef { id: "snipe",           name: "Snipe",             mana_cost: 30, cooldown_ticks: 100, damage_mult: 5.0,  range: 15.0, is_aoe: false, aoe_radius: 0.0, class: "ranger", heal_amount: 0.0, effect: None },
+    SkillDef { id: "explosive_arrow", name: "Explosive Arrow",   mana_cost: 25, cooldown_ticks: 80,  damage_mult: 2.0,  range: 9.0,  is_aoe: true,  aoe_radius: 4.0, class: "ranger", heal_amount: 0.0, effect: Some(("burn", 6, 60)) },
+    SkillDef { id: "wind_walk",       name: "Wind Walk",         mana_cost: 20, cooldown_ticks: 180, damage_mult: 0.0,  range: 0.0,  is_aoe: false, aoe_radius: 0.0, class: "ranger", heal_amount: 0.0, effect: Some(("buff_spd", 12, 160)) },
+    SkillDef { id: "entangle",        name: "Entangle",          mana_cost: 18, cooldown_ticks: 100, damage_mult: 0.5,  range: 7.0,  is_aoe: true,  aoe_radius: 3.5, class: "ranger", heal_amount: 0.0, effect: Some(("slow", 15, 100)) },
+    // ─── Warrior Tier 4 (Ultimate & Utility) ───
+    SkillDef { id: "shield_wall",     name: "Shield Wall",       mana_cost: 40, cooldown_ticks: 480, damage_mult: 0.0,  range: 0.0,  is_aoe: false, aoe_radius: 0.0, class: "warrior", heal_amount: 0.5,  effect: Some(("buff_atk", 10, 300)) },
+    SkillDef { id: "warcry",          name: "War Cry",           mana_cost: 35, cooldown_ticks: 360, damage_mult: 0.0,  range: 0.0,  is_aoe: true,  aoe_radius: 6.0, class: "warrior", heal_amount: 0.0,  effect: Some(("weakness", 12, 120)) },
+    SkillDef { id: "cleave",          name: "Cleave",            mana_cost: 18, cooldown_ticks: 45,  damage_mult: 1.8,  range: 3.0,  is_aoe: true,  aoe_radius: 3.5, class: "warrior", heal_amount: 0.0,  effect: Some(("armor_break", 8, 80)) },
+    SkillDef { id: "titan_grip",      name: "Titan's Grip",      mana_cost: 50, cooldown_ticks: 600, damage_mult: 4.5,  range: 2.5,  is_aoe: false, aoe_radius: 0.0, class: "warrior", heal_amount: 0.0,  effect: Some(("stun", 0, 50)) },
+    // ─── Mage Tier 4 (Ultimate & Utility) ───
+    SkillDef { id: "arcane_barrier",  name: "Arcane Barrier",    mana_cost: 45, cooldown_ticks: 400, damage_mult: 0.0,  range: 0.0,  is_aoe: false, aoe_radius: 0.0, class: "mage", heal_amount: 0.4,  effect: None },
+    SkillDef { id: "gravity_well",    name: "Gravity Well",      mana_cost: 55, cooldown_ticks: 300, damage_mult: 2.5,  range: 8.0,  is_aoe: true,  aoe_radius: 6.0, class: "mage", heal_amount: 0.0,  effect: Some(("slow", 20, 140)) },
+    SkillDef { id: "mana_burst",      name: "Mana Burst",        mana_cost: 80, cooldown_ticks: 500, damage_mult: 5.0,  range: 6.0,  is_aoe: true,  aoe_radius: 5.0, class: "mage", heal_amount: 0.0,  effect: Some(("freeze", 0, 60)) },
+    SkillDef { id: "dimension_rift",  name: "Dimension Rift",    mana_cost: 90, cooldown_ticks: 700, damage_mult: 7.0,  range: 10.0, is_aoe: true,  aoe_radius: 7.0, class: "mage", heal_amount: 0.0,  effect: Some(("burn", 20, 160)) },
+    // ─── Rogue Tier 4 (Ultimate & Utility) ───
+    SkillDef { id: "shadow_dance",    name: "Shadow Dance",      mana_cost: 45, cooldown_ticks: 360, damage_mult: 0.0,  range: 0.0,  is_aoe: false, aoe_radius: 0.0, class: "rogue", heal_amount: 0.2,  effect: Some(("buff_spd", 20, 240)) },
+    SkillDef { id: "throat_slash",    name: "Throat Slash",      mana_cost: 30, cooldown_ticks: 120, damage_mult: 3.5,  range: 2.0,  is_aoe: false, aoe_radius: 0.0, class: "rogue", heal_amount: 0.0,  effect: Some(("bleed", 15, 160)) },
+    SkillDef { id: "shuriken_storm",  name: "Shuriken Storm",    mana_cost: 40, cooldown_ticks: 160, damage_mult: 2.0,  range: 6.0,  is_aoe: true,  aoe_radius: 5.0, class: "rogue", heal_amount: 0.0,  effect: Some(("slow", 10, 80)) },
+    SkillDef { id: "phantom_strike",  name: "Phantom Strike",    mana_cost: 70, cooldown_ticks: 600, damage_mult: 10.0, range: 3.0,  is_aoe: false, aoe_radius: 0.0, class: "rogue", heal_amount: 0.0,  effect: Some(("poison", 25, 200)) },
+    // ─── Ranger Tier 4 (Ultimate & Utility) ───
+    SkillDef { id: "natures_blessing",name: "Nature's Blessing", mana_cost: 40, cooldown_ticks: 360, damage_mult: 0.0,  range: 0.0,  is_aoe: false, aoe_radius: 0.0, class: "ranger", heal_amount: 0.35, effect: Some(("buff_atk", 8, 200)) },
+    SkillDef { id: "volley",          name: "Volley",            mana_cost: 35, cooldown_ticks: 140, damage_mult: 1.5,  range: 10.0, is_aoe: true,  aoe_radius: 6.0, class: "ranger", heal_amount: 0.0,  effect: Some(("bleed", 6, 80)) },
+    SkillDef { id: "ice_trap",        name: "Ice Trap",          mana_cost: 22, cooldown_ticks: 120, damage_mult: 1.0,  range: 6.0,  is_aoe: true,  aoe_radius: 3.0, class: "ranger", heal_amount: 0.0,  effect: Some(("freeze", 0, 60)) },
+    SkillDef { id: "hawk_fury",       name: "Hawk's Fury",       mana_cost: 80, cooldown_ticks: 600, damage_mult: 4.0,  range: 12.0, is_aoe: true,  aoe_radius: 8.0, class: "ranger", heal_amount: 0.0,  effect: Some(("bleed", 12, 120)) },
 ];
 
 fn find_skill(skill_id: &str) -> Option<&'static SkillDef> {
     SKILLS.iter().find(|s| s.id == skill_id)
+}
+
+fn skill_effect_to_status(name: &str) -> Option<protocol::StatusEffectType> {
+    match name {
+        "stun" => Some(protocol::StatusEffectType::Stun),
+        "freeze" => Some(protocol::StatusEffectType::Freeze),
+        "burn" => Some(protocol::StatusEffectType::Burn),
+        "poison" => Some(protocol::StatusEffectType::Poison),
+        "bleed" => Some(protocol::StatusEffectType::Bleed),
+        "weakness" => Some(protocol::StatusEffectType::Weakness),
+        "armor_break" => Some(protocol::StatusEffectType::ArmorBreak),
+        _ => None,
+    }
 }
 
 fn handle_use_skill(state: &Arc<AppState>, player_id: Uuid, payload: &serde_json::Value) {
@@ -1168,6 +1688,21 @@ fn handle_use_skill(state: &Arc<AppState>, player_id: Uuid, payload: &serde_json
                         enemy.hp -= dmg;
                         hit_count += 1;
 
+                        // Apply skill CC/DoT effects to enemy
+                        if let Some((eff_name, eff_val, eff_dur)) = &skill.effect {
+                            match *eff_name {
+                                "stun" | "freeze" => { enemy.stun_ticks = enemy.stun_ticks.max(*eff_dur); }
+                                "burn" | "poison" | "bleed" => {
+                                    // DoT: apply total damage as bonus (simplified for enemies)
+                                    let dot_total = *eff_val * (*eff_dur as i32 / 20).max(1);
+                                    enemy.hp -= dot_total;
+                                }
+                                "armor_break" => { enemy.def = (enemy.def - *eff_val).max(0); }
+                                "weakness" => { enemy.atk = (enemy.atk - *eff_val).max(1); }
+                                _ => {}
+                            }
+                        }
+
                         let combat_msg = json!({
                             "type": MSG_COMBAT_EVENT,
                             "payload": {
@@ -1223,19 +1758,28 @@ fn handle_use_skill(state: &Arc<AppState>, player_id: Uuid, payload: &serde_json
                             }
 
                             if let Some(mut player) = state.players.get_mut(&player_id) {
-                                player.xp += xp_reward;
+                                // Stamina XP multiplier
+                                let stamina_mult = if player.stamina_minutes > 2400 { 1.5 } else if player.stamina_minutes >= 840 { 1.0 } else { 0.5 };
+                                let stamina_xp = (xp_reward as f64 * stamina_mult) as u64;
+                                player.xp += stamina_xp;
                                 player.gold += gold;
+                                // Bestiary tracking
+                                *player.bestiary.entry(enemy_name.clone()).or_insert(0) += 1;
                                 player.stats_tracker.enemies_killed += 1;
                                 player.stats_tracker.gold_earned += gold;
                                 let name_lower = enemy_name.to_lowercase();
                                 *player.stats_tracker.enemies_killed_by_type.entry(name_lower).or_insert(0) += 1;
                                 match &enemy_rank {
-                                    protocol::EnemyRank::Boss => player.stats_tracker.boss_kills += 1,
+                                    protocol::EnemyRank::Boss => {
+                                        player.stats_tracker.boss_kills += 1;
+                                        player.bosses_killed += 1;
+                                    }
                                     protocol::EnemyRank::Elite => player.stats_tracker.elite_kills += 1,
                                     protocol::EnemyRank::Champion => player.stats_tracker.champion_kills += 1,
                                     _ => {}
                                 }
                                 check_and_apply_level_up(&mut player, state);
+                                check_title_unlocks(&mut player);
                                 send_stats_update(state, &player);
                             }
                             aoe_kills.push((enemy_name, enemy_rank));
@@ -1245,6 +1789,11 @@ fn handle_use_skill(state: &Arc<AppState>, player_id: Uuid, payload: &serde_json
                     }
                 }
             }
+        }
+
+        // Send title update after AoE kills (no DashMap guards held)
+        if !aoe_kills.is_empty() {
+            send_title_update(state, &player_id);
         }
 
         // Quest hooks for all AoE kills (no DashMap guards held)
@@ -1306,6 +1855,20 @@ fn handle_use_skill(state: &Arc<AppState>, player_id: Uuid, payload: &serde_json
             let dmg = (raw * (1.0 - def_red) * crit_mult).max(1.0) as i32;
             enemy.hp -= dmg;
 
+            // Apply skill CC/DoT effects to enemy
+            if let Some((eff_name, eff_val, eff_dur)) = &skill.effect {
+                match *eff_name {
+                    "stun" | "freeze" => { enemy.stun_ticks = enemy.stun_ticks.max(*eff_dur); }
+                    "burn" | "poison" | "bleed" => {
+                        let dot_total = *eff_val * (*eff_dur as i32 / 20).max(1);
+                        enemy.hp -= dot_total;
+                    }
+                    "armor_break" => { enemy.def = (enemy.def - *eff_val).max(0); }
+                    "weakness" => { enemy.atk = (enemy.atk - *eff_val).max(1); }
+                    _ => {}
+                }
+            }
+
             let combat_msg = json!({
                 "type": MSG_COMBAT_EVENT,
                 "payload": {
@@ -1361,11 +1924,18 @@ fn handle_use_skill(state: &Arc<AppState>, player_id: Uuid, payload: &serde_json
                 }
 
                 if let Some(mut player) = state.players.get_mut(&player_id) {
-                    player.xp += xp_reward;
+                    // Stamina XP multiplier
+                    let stamina_mult = if player.stamina_minutes > 2400 { 1.5 } else if player.stamina_minutes >= 840 { 1.0 } else { 0.5 };
+                    let stamina_xp = (xp_reward as f64 * stamina_mult) as u64;
+                    player.xp += stamina_xp;
                     player.gold += gold;
+                    // Bestiary tracking
+                    *player.bestiary.entry(enemy_name.clone()).or_insert(0) += 1;
                     check_and_apply_level_up(&mut player, state);
+                    check_title_unlocks(&mut player);
                     send_stats_update(state, &player);
                 }
+                send_title_update(state, &player_id);
 
                 let loot_names: Vec<String> = loot.iter().map(|i| i.name.clone()).collect();
                 let kill_msg = json!({
@@ -1502,6 +2072,7 @@ fn handle_party_action(state: &Arc<AppState>, player_id: Uuid, payload: &serde_j
                         }
                         drop(members);
                         send_party_update(state, &party_id);
+                        update_daily_quest_progress(state, &player_id, "join_party", 1);
                     } else {
                         sys_msg(state, &player_id, "Party is full (max 5).".to_string());
                     }
@@ -1587,6 +2158,59 @@ fn handle_party_action(state: &Arc<AppState>, player_id: Uuid, payload: &serde_j
             }
         }
         _ => {}
+    }
+}
+
+/// Recalculate party buffs for all players in parties.
+/// Bonuses: +3% ATK, +3% DEF, +5% max HP per party member (excluding self).
+/// Class synergy: diverse classes grant +2% extra per unique class.
+fn update_party_buffs(state: &Arc<AppState>) {
+    // Collect party member info first
+    let mut party_members: HashMap<Uuid, Vec<(Uuid, String, i32, i32, i32)>> = HashMap::new();
+    for entry in state.parties.iter() {
+        let party_id = *entry.key();
+        let members = entry.value();
+        let mut member_info = Vec::new();
+        for mid in members {
+            if let Some(p) = state.players.get(mid) {
+                member_info.push((*mid, p.class.clone(), p.atk, p.def, p.max_hp));
+            }
+        }
+        party_members.insert(party_id, member_info);
+    }
+
+    // Reset all solo players' buffs
+    let players_in_parties: std::collections::HashSet<Uuid> = state.player_party.iter()
+        .map(|e| *e.key())
+        .collect();
+
+    for mut entry in state.players.iter_mut() {
+        let p = entry.value_mut();
+        if !players_in_parties.contains(&p.id) {
+            p.party_bonus_atk = 0;
+            p.party_bonus_def = 0;
+            p.party_bonus_hp = 0;
+        }
+    }
+
+    // Apply party buffs
+    for (_party_id, members) in &party_members {
+        let count = members.len() as i32;
+        if count < 2 { continue; }
+        let other_count = count - 1;
+        let unique_classes: std::collections::HashSet<&str> = members.iter().map(|m| m.1.as_str()).collect();
+        let class_bonus_pct = (unique_classes.len() as i32 - 1).max(0) * 2; // +2% per unique class beyond first
+
+        for (mid, _, base_atk, base_def, base_hp) in members {
+            let atk_bonus = ((*base_atk as f64) * (other_count as f64 * 0.03 + class_bonus_pct as f64 * 0.01)) as i32;
+            let def_bonus = ((*base_def as f64) * (other_count as f64 * 0.03 + class_bonus_pct as f64 * 0.01)) as i32;
+            let hp_bonus = ((*base_hp as f64) * (other_count as f64 * 0.05 + class_bonus_pct as f64 * 0.01)) as i32;
+            if let Some(mut player) = state.players.get_mut(mid) {
+                player.party_bonus_atk = atk_bonus;
+                player.party_bonus_def = def_bonus;
+                player.party_bonus_hp = hp_bonus;
+            }
+        }
     }
 }
 
@@ -1984,12 +2608,39 @@ fn handle_pvp_attack(state: &Arc<AppState>, attacker_id: Uuid, target_id: Uuid) 
     state.send_to_all_near(tx, ty, 40.0, &combat_msg);
 
     if killed {
-        // Handle PvP death
+        // Handle PvP death — apply skull to attacker
+        {
+            let mut attacker = state.players.get_mut(&attacker_id).unwrap();
+            attacker.stats_tracker.pvp_kills += 1;
+            attacker.pvp_kills_today += 1;
+
+            // Skull escalation: white → red → black
+            if attacker.pvp_kills_today >= 10 {
+                attacker.skull_type = 3; // Black skull
+                attacker.skull_timer = 12000; // 10 min
+            } else if attacker.pvp_kills_today >= 3 {
+                attacker.skull_type = 2; // Red skull
+                attacker.skull_timer = 6000; // 5 min
+            } else if attacker.skull_type == 0 {
+                attacker.skull_type = 1; // White skull
+                attacker.skull_timer = 2400; // 2 min
+            }
+        }
+
         let (dropped_items, dropped_gold) = {
             let mut target = state.players.get_mut(&target_id).unwrap();
             target.dead = true;
             target.hp = 0;
             target.respawn_timer = 100.0; // 5 seconds at 20 tps
+
+            // XP penalty: lose 10% of xp needed for next level, reduced by blessings (20% each)
+            let blessing_count = target.blessings.count_ones() as f64;
+            let xp_loss_base = target.xp_to_next_level() / 10;
+            let xp_loss = (xp_loss_base as f64 * (1.0 - blessing_count * 0.20).max(0.0)) as u64;
+            if target.xp >= xp_loss && target.level >= 10 {
+                target.xp -= xp_loss;
+            }
+
             pvp_death_drops(&mut target)
         };
 
@@ -2015,6 +2666,33 @@ fn handle_pvp_attack(state: &Arc<AppState>, attacker_id: Uuid, target_id: Uuid) 
         }
         send_stats_update_by_id(state, &attacker_id);
 
+        // Bounty claim — if victim had a bounty, award it to killer
+        let bounty_amount = if let Some(mut target) = state.players.get_mut(&target_id) {
+            std::mem::take(&mut target.bounty_gold)
+        } else {
+            0
+        };
+        if bounty_amount > 0 {
+            if let Some(mut attacker) = state.players.get_mut(&attacker_id) {
+                attacker.gold += bounty_amount;
+            }
+            let bounty_msg = json!({
+                "type": MSG_CHAT_MESSAGE,
+                "payload": {
+                    "sender": "Bounty",
+                    "text": format!("{} claimed the {}g bounty on {}!", attacker_name, bounty_amount, target_name),
+                    "channel": "combat"
+                }
+            }).to_string();
+            state.broadcast(&bounty_msg);
+            send_inventory_update(state, &attacker_id);
+            let bounty_update = json!({
+                "type": MSG_BOUNTY_UPDATE,
+                "payload": { "target": target_name, "bounty": 0 }
+            }).to_string();
+            state.send_to(&target_id, &bounty_update);
+        }
+
         // Death notification
         let death_msg = json!({
             "type": MSG_DEATH,
@@ -2035,10 +2713,59 @@ fn handle_pvp_attack(state: &Arc<AppState>, attacker_id: Uuid, target_id: Uuid) 
 
         broadcast_ground_items(state, tx, ty);
         send_inventory_update(state, &target_id);
+
+        // Arena match resolution — if kill happened in arena zone
+        resolve_arena_kill(state, attacker_id, target_id);
     }
 }
 
-// ─── Item Pickup Handler ─────────────────────────────────────
+fn resolve_arena_kill(state: &Arc<AppState>, winner_id: Uuid, loser_id: Uuid) {
+    let in_arena = {
+        match state.players.get(&loser_id) {
+            Some(p) => p.x >= 140.0 && p.x <= 165.0 && p.y >= 140.0 && p.y <= 165.0,
+            None => false,
+        }
+    };
+    if !in_arena { return; }
+
+    let (winner_name, loser_name, winner_new_rating, loser_new_rating);
+    {
+        let mut winner = match state.players.get_mut(&winner_id) { Some(p) => p, None => return };
+        winner.arena_wins += 1;
+        winner.arena_rating = (winner.arena_rating + 25).min(3000);
+        winner_new_rating = winner.arena_rating;
+        winner_name = winner.username.clone();
+    }
+    {
+        let mut loser = match state.players.get_mut(&loser_id) { Some(p) => p, None => return };
+        loser.arena_losses += 1;
+        loser.arena_rating = loser.arena_rating.saturating_sub(20).max(100);
+        loser_new_rating = loser.arena_rating;
+        loser_name = loser.username.clone();
+    }
+
+    // Send arena update to both
+    let win_msg = json!({
+        "type": crate::protocol::MSG_ARENA_UPDATE,
+        "payload": { "action": "match_end", "result": "win", "ratingChange": 25, "newRating": winner_new_rating, "opponent": loser_name }
+    }).to_string();
+    state.send_to(&winner_id, &win_msg);
+
+    let lose_msg = json!({
+        "type": crate::protocol::MSG_ARENA_UPDATE,
+        "payload": { "action": "match_end", "result": "loss", "ratingChange": -20, "newRating": loser_new_rating, "opponent": winner_name }
+    }).to_string();
+    state.send_to(&loser_id, &lose_msg);
+
+    // Global announcement for high-rated matches
+    if winner_new_rating >= 1500 || loser_new_rating >= 1500 {
+        let announce = json!({
+            "type": crate::protocol::MSG_CHAT_MESSAGE,
+            "payload": { "channel": "global", "sender": "Arena", "text": format!("⚔️ {} ({}) defeated {} ({}) in the arena!", winner_name, winner_new_rating, loser_name, loser_new_rating) }
+        }).to_string();
+        state.broadcast(&announce);
+    }
+}
 
 fn handle_pickup_item(state: &Arc<AppState>, player_id: Uuid, item_id: Uuid) {
     let player_pos = {
@@ -2533,6 +3260,7 @@ fn handle_use_item(state: &Arc<AppState>, player_id: Uuid, payload: &serde_json:
                     player.gold += sell_price;
                 }
 
+                check_title_unlocks(&mut player);
                 drop(player);
                 let msg = json!({
                     "type": MSG_CHAT_MESSAGE,
@@ -2541,6 +3269,11 @@ fn handle_use_item(state: &Arc<AppState>, player_id: Uuid, payload: &serde_json:
                 state.send_to(&player_id, &msg);
                 send_inventory_update(state, &player_id);
                 send_stats_update_by_id(state, &player_id);
+                send_title_update(state, &player_id);
+                // Faction rep: Merchant League gains from selling
+                if let Some(mut p) = state.players.get_mut(&player_id) {
+                    *p.faction_rep.entry("merchant_league".to_string()).or_insert(0) += 3;
+                }
             }
         }
         "use" => {
@@ -2666,6 +3399,20 @@ fn handle_use_item(state: &Arc<AppState>, player_id: Uuid, payload: &serde_json:
                         player.apply_effect(crate::protocol::ActiveEffect::new(
                             crate::protocol::StatusEffectType::Regen,
                             regen_hp, dur, 20, "food",
+                        ));
+                    }
+                    // Mount speed buff — long-duration haste
+                    if let Some(&mount_spd) = item_stats.get("MOUNT_SPEED") {
+                        player.apply_effect(crate::protocol::ActiveEffect::new(
+                            crate::protocol::StatusEffectType::Haste,
+                            mount_spd, 6000, 6000, "mount", // 5 minutes
+                        ));
+                    }
+                    // XP boost buff
+                    if let Some(&xp_val) = item_stats.get("XP_BOOST") {
+                        player.apply_effect(crate::protocol::ActiveEffect::new(
+                            crate::protocol::StatusEffectType::Strength,
+                            xp_val, 6000, 6000, "xp_boost", // 5 minutes
                         ));
                     }
                     // Teleport scroll — save px/py for teleport after drop
@@ -3146,6 +3893,257 @@ fn handle_craft(state: &Arc<AppState>, player_id: Uuid, recipe_id: &str) {
             level_required: 15,
             result_name: "Greater Haste Potion", result_type: "consumable", result_slot: None,
             result_rarity: 2, result_level: 15, result_stat_key: "HASTE", result_stat_val: 1 },
+        // ─── Void Set Recipes (End-game) ───
+        Recipe { id: "void_mask", name: "Void Mask", materials: &[("primordial_core", 3), ("soul_fragment", 4), ("adamantite_ore", 5)],
+            level_required: 30,
+            result_name: "Void Mask", result_type: "armor", result_slot: Some("head"),
+            result_rarity: 4, result_level: 30, result_stat_key: "DEF", result_stat_val: 28 },
+        Recipe { id: "void_cuirass", name: "Void Cuirass", materials: &[("primordial_core", 4), ("soul_fragment", 5), ("adamantite_ore", 8)],
+            level_required: 30,
+            result_name: "Void Cuirass", result_type: "armor", result_slot: Some("armor"),
+            result_rarity: 4, result_level: 30, result_stat_key: "DEF", result_stat_val: 35 },
+        Recipe { id: "void_tassets", name: "Void Tassets", materials: &[("primordial_core", 2), ("soul_fragment", 3), ("adamantite_ore", 6)],
+            level_required: 30,
+            result_name: "Void Tassets", result_type: "armor", result_slot: Some("legs"),
+            result_rarity: 4, result_level: 30, result_stat_key: "DEF", result_stat_val: 25 },
+        Recipe { id: "void_boots", name: "Void Boots", materials: &[("primordial_core", 2), ("soul_fragment", 2), ("adamantite_ore", 4)],
+            level_required: 30,
+            result_name: "Void Boots", result_type: "armor", result_slot: Some("boots"),
+            result_rarity: 4, result_level: 30, result_stat_key: "SPD", result_stat_val: 15 },
+        Recipe { id: "void_aegis", name: "Void Aegis", materials: &[("primordial_core", 5), ("soul_fragment", 6), ("dragon_scale", 4)],
+            level_required: 30,
+            result_name: "Void Aegis", result_type: "armor", result_slot: Some("shield"),
+            result_rarity: 4, result_level: 30, result_stat_key: "DEF", result_stat_val: 30 },
+        // ─── Celestial Set Recipes (Mage) ───
+        Recipe { id: "celestial_circlet", name: "Celestial Circlet", materials: &[("celestial_dust", 4), ("star_fragment", 3), ("gem_shard", 5)],
+            level_required: 25,
+            result_name: "Celestial Circlet", result_type: "armor", result_slot: Some("head"),
+            result_rarity: 3, result_level: 25, result_stat_key: "MP", result_stat_val: 30 },
+        Recipe { id: "celestial_robe", name: "Celestial Robe", materials: &[("celestial_dust", 6), ("silk", 5), ("star_fragment", 4)],
+            level_required: 25,
+            result_name: "Celestial Robe", result_type: "armor", result_slot: Some("armor"),
+            result_rarity: 3, result_level: 25, result_stat_key: "MP", result_stat_val: 40 },
+        Recipe { id: "celestial_ward", name: "Celestial Ward", materials: &[("celestial_dust", 3), ("star_fragment", 5), ("gem_shard", 4)],
+            level_required: 25,
+            result_name: "Celestial Ward", result_type: "armor", result_slot: Some("shield"),
+            result_rarity: 3, result_level: 25, result_stat_key: "DEF", result_stat_val: 20 },
+        // ─── Shadow Set Recipes (Rogue) ───
+        Recipe { id: "shadow_vestments", name: "Shadow Vestments", materials: &[("silk", 8), ("leather", 5), ("soul_fragment", 2)],
+            level_required: 25,
+            result_name: "Shadow Vestments", result_type: "armor", result_slot: Some("armor"),
+            result_rarity: 3, result_level: 25, result_stat_key: "SPD", result_stat_val: 12 },
+        Recipe { id: "shadow_cloak", name: "Shadow Cloak", materials: &[("silk", 6), ("soul_fragment", 3), ("leather", 4)],
+            level_required: 25,
+            result_name: "Shadow Cloak", result_type: "armor", result_slot: Some("cape"),
+            result_rarity: 3, result_level: 25, result_stat_key: "LCK", result_stat_val: 15 },
+        // ─── Legendary Weapons ───
+        Recipe { id: "worldbreaker", name: "Worldbreaker", materials: &[("primordial_core", 6), ("dragon_scale", 8), ("adamantite_ore", 10)],
+            level_required: 35,
+            result_name: "Worldbreaker", result_type: "weapon", result_slot: Some("weapon"),
+            result_rarity: 5, result_level: 35, result_stat_key: "ATK", result_stat_val: 50 },
+        Recipe { id: "soulreaver", name: "Soulreaver", materials: &[("soul_fragment", 8), ("primordial_core", 4), ("blood_ruby", 5)],
+            level_required: 35,
+            result_name: "Soulreaver", result_type: "weapon", result_slot: Some("weapon"),
+            result_rarity: 5, result_level: 35, result_stat_key: "ATK", result_stat_val: 45 },
+        Recipe { id: "starfall_staff", name: "Starfall Staff", materials: &[("star_fragment", 8), ("celestial_dust", 6), ("primordial_core", 3)],
+            level_required: 35,
+            result_name: "Starfall Staff", result_type: "weapon", result_slot: Some("weapon"),
+            result_rarity: 5, result_level: 35, result_stat_key: "ATK", result_stat_val: 42 },
+        // ─── Accessories ───
+        Recipe { id: "ring_of_power", name: "Ring of Power", materials: &[("gem_shard", 8), ("blood_ruby", 3), ("mithril_ore", 4)],
+            level_required: 20,
+            result_name: "Ring of Power", result_type: "accessory", result_slot: Some("ring"),
+            result_rarity: 3, result_level: 20, result_stat_key: "ATK", result_stat_val: 12 },
+        Recipe { id: "amulet_of_protection", name: "Amulet of Protection", materials: &[("gem_shard", 6), ("adamantite_ore", 3), ("celestial_dust", 2)],
+            level_required: 20,
+            result_name: "Amulet of Protection", result_type: "accessory", result_slot: Some("amulet"),
+            result_rarity: 3, result_level: 20, result_stat_key: "DEF", result_stat_val: 15 },
+        Recipe { id: "lucky_charm", name: "Lucky Charm", materials: &[("gem_shard", 10), ("star_fragment", 2)],
+            level_required: 15,
+            result_name: "Lucky Charm", result_type: "accessory", result_slot: Some("ring"),
+            result_rarity: 2, result_level: 15, result_stat_key: "LCK", result_stat_val: 10 },
+        // ─── Enchanting Stones from materials ───
+        Recipe { id: "craft_enchanting_stone", name: "Enchanting Stone", materials: &[("gem_shard", 5), ("mithril_ore", 2)],
+            level_required: 10,
+            result_name: "Enchanting Stone", result_type: "consumable", result_slot: None,
+            result_rarity: 2, result_level: 10, result_stat_key: "ENCHANT", result_stat_val: 1 },
+        // ─── New Elixirs & Buff Potions ───
+        Recipe { id: "speed_elixir", name: "Speed Elixir", materials: &[("herb", 4), ("silk", 2), ("gem_shard", 1)],
+            level_required: 10,
+            result_name: "Speed Elixir", result_type: "consumable", result_slot: None,
+            result_rarity: 2, result_level: 10, result_stat_key: "HASTE", result_stat_val: 1 },
+        Recipe { id: "defense_elixir", name: "Defense Elixir", materials: &[("herb", 5), ("iron_ore", 3), ("gem_shard", 1)],
+            level_required: 12,
+            result_name: "Defense Elixir", result_type: "consumable", result_slot: None,
+            result_rarity: 2, result_level: 12, result_stat_key: "SHIELD", result_stat_val: 80 },
+        Recipe { id: "berserker_draught", name: "Berserker Draught", materials: &[("herb", 6), ("dragon_scale", 1), ("gem_shard", 2)],
+            level_required: 15,
+            result_name: "Berserker Draught", result_type: "consumable", result_slot: None,
+            result_rarity: 3, result_level: 15, result_stat_key: "STRENGTH", result_stat_val: 25 },
+        Recipe { id: "scroll_town_portal", name: "Scroll of Town Portal", materials: &[("herb", 3), ("gem_shard", 2)],
+            level_required: 8,
+            result_name: "Scroll of Town Portal", result_type: "consumable", result_slot: None,
+            result_rarity: 1, result_level: 8, result_stat_key: "TELEPORT", result_stat_val: 1 },
+        Recipe { id: "grilled_fish", name: "Grilled Fish", materials: &[("raw_fish", 1), ("wood", 1)],
+            level_required: 1,
+            result_name: "Grilled Fish", result_type: "consumable", result_slot: None,
+            result_rarity: 0, result_level: 1, result_stat_key: "HP", result_stat_val: 40 },
+        Recipe { id: "greater_mana_potion", name: "Greater Mana Potion", materials: &[("herb", 5), ("gem_shard", 2)],
+            level_required: 10,
+            result_name: "Greater Mana Potion", result_type: "consumable", result_slot: None,
+            result_rarity: 1, result_level: 10, result_stat_key: "MP", result_stat_val: 75 },
+        Recipe { id: "divine_health_potion", name: "Divine Health Potion", materials: &[("herb", 10), ("dragon_scale", 1), ("gem_shard", 3)],
+            level_required: 20,
+            result_name: "Divine Health Potion", result_type: "consumable", result_slot: None,
+            result_rarity: 3, result_level: 20, result_stat_key: "HP", result_stat_val: 400 },
+        Recipe { id: "elixir_of_experience", name: "Elixir of Experience", materials: &[("herb", 8), ("star_fragment", 1), ("celestial_dust", 1)],
+            level_required: 20,
+            result_name: "Elixir of Experience", result_type: "consumable", result_slot: None,
+            result_rarity: 3, result_level: 20, result_stat_key: "XP_BOOST", result_stat_val: 1 },
+        // ─── Phase 11: Advanced crafting recipes ───
+        Recipe { id: "dragonscale_armor", name: "Dragonscale Armor", materials: &[("dragon_scale", 8), ("steel_bar", 5), ("gem_shard", 3)],
+            level_required: 25,
+            result_name: "Dragonscale Armor", result_type: "armor", result_slot: Some("armor"),
+            result_rarity: 4, result_level: 25, result_stat_key: "DEF", result_stat_val: 35 },
+        Recipe { id: "phoenix_feather_cape", name: "Phoenix Feather Cape", materials: &[("phoenix_feather", 3), ("silk_thread", 5), ("enchanting_stone", 2)],
+            level_required: 22,
+            result_name: "Phoenix Feather Cape", result_type: "armor", result_slot: Some("cape"),
+            result_rarity: 4, result_level: 22, result_stat_key: "SPD", result_stat_val: 12 },
+        Recipe { id: "titan_gauntlets", name: "Titan Gauntlets", materials: &[("steel_bar", 6), ("titan_shard", 2), ("enchanting_stone", 3)],
+            level_required: 28,
+            result_name: "Titan Gauntlets", result_type: "armor", result_slot: Some("gloves"),
+            result_rarity: 4, result_level: 28, result_stat_key: "ATK", result_stat_val: 20 },
+        Recipe { id: "archmage_staff", name: "Archmage Staff", materials: &[("arcane_crystal", 4), ("dragon_scale", 3), ("enchanting_stone", 5)],
+            level_required: 30,
+            result_name: "Archmage Staff", result_type: "weapon", result_slot: Some("weapon"),
+            result_rarity: 4, result_level: 30, result_stat_key: "ATK", result_stat_val: 32 },
+        Recipe { id: "void_blade", name: "Void Blade", materials: &[("void_shard", 5), ("steel_bar", 4), ("enchanting_stone", 4)],
+            level_required: 30,
+            result_name: "Void Blade", result_type: "weapon", result_slot: Some("weapon"),
+            result_rarity: 4, result_level: 30, result_stat_key: "ATK", result_stat_val: 38 },
+        Recipe { id: "guardian_shield", name: "Guardian Shield", materials: &[("steel_bar", 8), ("gem_shard", 5), ("dragon_scale", 2)],
+            level_required: 20,
+            result_name: "Guardian Shield", result_type: "armor", result_slot: Some("shield"),
+            result_rarity: 3, result_level: 20, result_stat_key: "DEF", result_stat_val: 25 },
+        Recipe { id: "moonstone_amulet", name: "Moonstone Amulet", materials: &[("gem_shard", 6), ("silk_thread", 3), ("star_fragment", 2)],
+            level_required: 18,
+            result_name: "Moonstone Amulet", result_type: "armor", result_slot: Some("amulet"),
+            result_rarity: 3, result_level: 18, result_stat_key: "MP", result_stat_val: 35 },
+        Recipe { id: "shadow_dagger", name: "Shadow Dagger", materials: &[("steel_bar", 3), ("shadow_essence", 4), ("enchanting_stone", 2)],
+            level_required: 22,
+            result_name: "Shadow Dagger", result_type: "weapon", result_slot: Some("weapon"),
+            result_rarity: 3, result_level: 22, result_stat_key: "ATK", result_stat_val: 25 },
+        Recipe { id: "scroll_mass_heal", name: "Scroll of Mass Heal", materials: &[("herb", 10), ("holy_water", 2), ("blank_scroll", 3)],
+            level_required: 20,
+            result_name: "Scroll of Mass Heal", result_type: "consumable", result_slot: None,
+            result_rarity: 3, result_level: 20, result_stat_key: "HP", result_stat_val: 200 },
+        Recipe { id: "mithril_armor", name: "Mithril Armor", materials: &[("mithril_bar", 8), ("gem_shard", 4), ("enchanting_stone", 3)],
+            level_required: 35,
+            result_name: "Mithril Armor", result_type: "armor", result_slot: Some("armor"),
+            result_rarity: 4, result_level: 35, result_stat_key: "DEF", result_stat_val: 42 },
+        Recipe { id: "mithril_sword", name: "Mithril Sword", materials: &[("mithril_bar", 6), ("gem_shard", 3), ("enchanting_stone", 2)],
+            level_required: 35,
+            result_name: "Mithril Sword", result_type: "weapon", result_slot: Some("weapon"),
+            result_rarity: 4, result_level: 35, result_stat_key: "ATK", result_stat_val: 40 },
+        Recipe { id: "elven_longbow", name: "Elven Longbow", materials: &[("wood", 8), ("silk_thread", 4), ("enchanting_stone", 2)],
+            level_required: 20,
+            result_name: "Elven Longbow", result_type: "weapon", result_slot: Some("weapon"),
+            result_rarity: 3, result_level: 20, result_stat_key: "ATK", result_stat_val: 22 },
+        Recipe { id: "thunder_hammer", name: "Thunder Hammer", materials: &[("steel_bar", 6), ("thunder_crystal", 3), ("enchanting_stone", 3)],
+            level_required: 28,
+            result_name: "Thunder Hammer", result_type: "weapon", result_slot: Some("weapon"),
+            result_rarity: 4, result_level: 28, result_stat_key: "ATK", result_stat_val: 30 },
+        Recipe { id: "frost_ring", name: "Frost Ring", materials: &[("ice_crystal", 3), ("gem_shard", 4), ("enchanting_stone", 1)],
+            level_required: 15,
+            result_name: "Frost Ring", result_type: "armor", result_slot: Some("ring"),
+            result_rarity: 2, result_level: 15, result_stat_key: "DEF", result_stat_val: 10 },
+        Recipe { id: "fire_ring", name: "Fire Ring", materials: &[("fire_crystal", 3), ("gem_shard", 4), ("enchanting_stone", 1)],
+            level_required: 15,
+            result_name: "Fire Ring", result_type: "armor", result_slot: Some("ring"),
+            result_rarity: 2, result_level: 15, result_stat_key: "ATK", result_stat_val: 12 },
+
+        // === Advanced Consumables ===
+        Recipe { id: "supreme_health_potion", name: "Supreme Health Potion", materials: &[("herb", 5), ("mana_crystal", 2), ("gem_shard", 1)],
+            level_required: 20,
+            result_name: "Supreme Health Potion", result_type: "consumable", result_slot: None,
+            result_rarity: 2, result_level: 20, result_stat_key: "HP", result_stat_val: 400 },
+        Recipe { id: "supreme_mana_potion", name: "Supreme Mana Potion", materials: &[("mana_crystal", 5), ("herb", 2), ("gem_shard", 1)],
+            level_required: 20,
+            result_name: "Supreme Mana Potion", result_type: "consumable", result_slot: None,
+            result_rarity: 2, result_level: 20, result_stat_key: "MP", result_stat_val: 300 },
+        Recipe { id: "full_restore_elixir", name: "Full Restore Elixir", materials: &[("herb", 8), ("mana_crystal", 4), ("enchanting_stone", 2)],
+            level_required: 30,
+            result_name: "Full Restore Elixir", result_type: "consumable", result_slot: None,
+            result_rarity: 3, result_level: 30, result_stat_key: "HP", result_stat_val: 9999 },
+        Recipe { id: "titans_brew", name: "Titan's Brew", materials: &[("herb", 4), ("fire_crystal", 2), ("dragon_scale", 1)],
+            level_required: 25,
+            result_name: "Titan's Brew", result_type: "consumable", result_slot: None,
+            result_rarity: 3, result_level: 25, result_stat_key: "ATK", result_stat_val: 25 },
+        Recipe { id: "experience_tome", name: "Experience Tome", materials: &[("ancient_scroll", 3), ("enchanting_stone", 3), ("gem_shard", 2)],
+            level_required: 25,
+            result_name: "Experience Tome", result_type: "consumable", result_slot: None,
+            result_rarity: 3, result_level: 25, result_stat_key: "XP", result_stat_val: 100 },
+
+        // === Endgame Equipment (Lv 35-50) ===
+        Recipe { id: "void_armor", name: "Void Armor", materials: &[("void_shard", 5), ("mithril_bar", 4), ("enchanting_stone", 4)],
+            level_required: 35,
+            result_name: "Void Armor", result_type: "armor", result_slot: Some("chest"),
+            result_rarity: 4, result_level: 35, result_stat_key: "DEF", result_stat_val: 55 },
+        Recipe { id: "celestial_helm", name: "Celestial Helm", materials: &[("star_fragment", 3), ("mithril_bar", 3), ("gem_shard", 5)],
+            level_required: 35,
+            result_name: "Celestial Helm", result_type: "armor", result_slot: Some("head"),
+            result_rarity: 4, result_level: 35, result_stat_key: "DEF", result_stat_val: 38 },
+        Recipe { id: "abyssal_greaves", name: "Abyssal Greaves", materials: &[("void_shard", 3), ("dragon_scale", 2), ("mithril_bar", 3)],
+            level_required: 35,
+            result_name: "Abyssal Greaves", result_type: "armor", result_slot: Some("legs"),
+            result_rarity: 4, result_level: 35, result_stat_key: "DEF", result_stat_val: 42 },
+        Recipe { id: "titan_gauntlets_mk2", name: "Titan Gauntlets MK2", materials: &[("dragon_scale", 3), ("mithril_bar", 4), ("enchanting_stone", 3)],
+            level_required: 35,
+            result_name: "Titan Gauntlets MK2", result_type: "armor", result_slot: Some("gloves"),
+            result_rarity: 4, result_level: 35, result_stat_key: "ATK", result_stat_val: 30 },
+        Recipe { id: "demons_edge", name: "Demon's Edge", materials: &[("fire_crystal", 5), ("void_shard", 3), ("enchanting_stone", 4)],
+            level_required: 40,
+            result_name: "Demon's Edge", result_type: "weapon", result_slot: None,
+            result_rarity: 4, result_level: 40, result_stat_key: "ATK", result_stat_val: 65 },
+        Recipe { id: "holy_avenger", name: "Holy Avenger", materials: &[("star_fragment", 4), ("mithril_bar", 5), ("enchanting_stone", 5)],
+            level_required: 40,
+            result_name: "Holy Avenger", result_type: "weapon", result_slot: None,
+            result_rarity: 4, result_level: 40, result_stat_key: "ATK", result_stat_val: 60 },
+        Recipe { id: "blank_rune_craft", name: "Blank Rune", materials: &[("mana_crystal", 2), ("gem_shard", 1)],
+            level_required: 10,
+            result_name: "Blank Rune", result_type: "material", result_slot: None,
+            result_rarity: 1, result_level: 10, result_stat_key: "", result_stat_val: 0 },
+        // === Ashfall Furnace Recipes ===
+        Recipe { id: "magma_core_hammer", name: "Magma Core Hammer", materials: &[("obsidian_shard", 5), ("fire_crystal", 4), ("mithril_bar", 6)],
+            level_required: 35,
+            result_name: "Magma Core Hammer", result_type: "weapon", result_slot: Some("weapon"),
+            result_rarity: 5, result_level: 35, result_stat_key: "ATK", result_stat_val: 55 },
+        Recipe { id: "obsidian_plate_mail", name: "Obsidian Plate Mail", materials: &[("obsidian_shard", 8), ("dragon_scale", 4), ("mithril_bar", 5)],
+            level_required: 35,
+            result_name: "Obsidian Plate Mail", result_type: "armor", result_slot: Some("armor"),
+            result_rarity: 5, result_level: 35, result_stat_key: "DEF", result_stat_val: 48 },
+        // === Celestial Spire Recipes ===
+        Recipe { id: "astral_vestments", name: "Astral Vestments", materials: &[("celestial_dust", 10), ("star_fragment", 5), ("silk", 6)],
+            level_required: 40,
+            result_name: "Astral Vestments", result_type: "armor", result_slot: Some("armor"),
+            result_rarity: 5, result_level: 40, result_stat_key: "DEF", result_stat_val: 55 },
+        Recipe { id: "starforged_blade_craft", name: "Starforged Blade", materials: &[("star_fragment", 8), ("celestial_dust", 6), ("adamantite_ore", 8)],
+            level_required: 42,
+            result_name: "Starforged Blade", result_type: "weapon", result_slot: Some("weapon"),
+            result_rarity: 5, result_level: 42, result_stat_key: "ATK", result_stat_val: 65 },
+        // === Advanced Potions ===
+        Recipe { id: "phoenix_down_craft", name: "Phoenix Down", materials: &[("phoenix_ash", 3), ("herb", 10), ("star_fragment", 1)],
+            level_required: 25,
+            result_name: "Phoenix Down", result_type: "consumable", result_slot: None,
+            result_rarity: 4, result_level: 25, result_stat_key: "HP", result_stat_val: 500 },
+        Recipe { id: "celestial_nectar_craft", name: "Celestial Nectar", materials: &[("celestial_dust", 2), ("herb", 8), ("honey", 3)],
+            level_required: 30,
+            result_name: "Celestial Nectar", result_type: "consumable", result_slot: None,
+            result_rarity: 4, result_level: 30, result_stat_key: "HP", result_stat_val: 200 },
+        Recipe { id: "void_essence_flask", name: "Void Essence Flask", materials: &[("void_shard", 2), ("mana_crystal", 3), ("herb", 5)],
+            level_required: 30,
+            result_name: "Void Essence Flask", result_type: "consumable", result_slot: None,
+            result_rarity: 4, result_level: 30, result_stat_key: "ATK", result_stat_val: 40 },
     ];
 
     let recipe = match recipes.iter().find(|r| r.id == recipe_id) {
@@ -3257,10 +4255,18 @@ fn handle_craft(state: &Arc<AppState>, player_id: Uuid, recipe_id: &str) {
             // Quest/achievement hooks for crafting
             if let Some(mut p) = state.players.get_mut(&player_id) {
                 p.stats_tracker.items_crafted += 1;
+                p.crafts_count += 1;
+                check_title_unlocks(&mut p);
                 drop(p);
             }
             check_quest_progress(state, player_id, "craft", "", 1);
             check_achievements(state, player_id);
+            send_title_update(state, &player_id);
+            update_daily_quest_progress(state, &player_id, "craft_items", 1);
+            // Faction rep: Arcane Circle gains from crafting
+            if let Some(mut p) = state.players.get_mut(&player_id) {
+                *p.faction_rep.entry("arcane_circle".to_string()).or_insert(0) += 5;
+            }
         } else {
             let msg = json!({
                 "type": MSG_CHAT_MESSAGE,
@@ -3635,6 +4641,10 @@ fn handle_enchant_item(state: &Arc<AppState>, player_id: Uuid, payload: &serde_j
         item.name = enchanted_item_name(&item.name, new_level);
         let result_name = item.name.clone();
 
+        if success {
+            player.items_enchanted += 1;
+        }
+
         (success, new_level, result_name, result_msg)
     }; // player guard dropped
 
@@ -3652,6 +4662,9 @@ fn handle_enchant_item(state: &Arc<AppState>, player_id: Uuid, payload: &serde_j
 
     // Send updated inventory
     send_inventory_update(state, &player_id);
+    if success {
+        update_daily_quest_progress(state, &player_id, "enchant_item", 1);
+    }
 }
 
 // ─── Guild System ────────────────────────────────────────────
@@ -4382,12 +5395,192 @@ fn handle_fishing_action(state: &Arc<AppState>, player_id: Uuid, payload: &serde
                 let chat_msg = json!({"type": MSG_CHAT_MESSAGE, "payload": {"sender":"System","text": format!("{} You caught a {} {}! ({}g)", icon, rarity_name, name, sell_value),"channel":"system"}}).to_string();
                 state.send_to(&player_id, &chat_msg);
                 send_inventory_update(state, &player_id);
+                // Faction rep: Wild Hunters gain from fishing
+                if let Some(mut p) = state.players.get_mut(&player_id) {
+                    p.fish_caught += 1;
+                    *p.faction_rep.entry("wild_hunters".to_string()).or_insert(0) += 3;
+                    check_title_unlocks(&mut p);
+                }
+                send_title_update(state, &player_id);
+                update_daily_quest_progress(state, &player_id, "catch_fish", 1);
             } else {
                 let msg = json!({"type": MSG_CHAT_MESSAGE, "payload": {"sender":"System","text":"Inventory full! Can't keep the catch.","channel":"system"}}).to_string();
                 state.send_to(&player_id, &msg);
             }
         }
         _ => {}
+    }
+}
+
+// ─── Mining/Gathering Handler ────────────────────────────────
+
+fn handle_gather_action(state: &Arc<AppState>, player_id: Uuid, payload: &serde_json::Value) {
+    let action = payload.get("action").and_then(|v| v.as_str()).unwrap_or("");
+    let node_type = payload.get("node_type").and_then(|v| v.as_str()).unwrap_or("");
+
+    // Look up node definition
+    let node = match MINING_NODES.iter().find(|(nt, _, _, _, _, _)| *nt == node_type) {
+        Some(n) => n,
+        None => {
+            let msg = json!({"type": MSG_CHAT_MESSAGE, "payload": {"sender":"System","text":"Unknown node type.","channel":"system"}}).to_string();
+            state.send_to(&player_id, &msg);
+            return;
+        }
+    };
+    let (_node_type, icon, rarity, min_level, resource_name, base_yield) = *node;
+
+    // Cooldown check (3 seconds = 3000ms)
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
+    {
+        let player = match state.players.get(&player_id) {
+            Some(p) => p,
+            None => return,
+        };
+        if now_ms.saturating_sub(player.last_gather_tick) < 3000 {
+            let msg = json!({"type": MSG_CHAT_MESSAGE, "payload": {"sender":"System","text":"⏳ You must wait before gathering again.","channel":"system"}}).to_string();
+            drop(player);
+            state.send_to(&player_id, &msg);
+            return;
+        }
+    }
+
+    // Determine which skill to use
+    let is_mining = action == "mine";
+
+    // Check player level requirement
+    let (player_skill_level,) = {
+        let player = match state.players.get(&player_id) {
+            Some(p) => p,
+            None => return,
+        };
+        let lvl = if is_mining { player.mining_level } else { player.gathering_level };
+        (lvl,)
+    };
+
+    if player_skill_level < min_level {
+        let msg = json!({"type": MSG_CHAT_MESSAGE, "payload": {"sender":"System","text": format!("⛔ Requires {} level {} (yours: {}).", if is_mining { "mining" } else { "gathering" }, min_level, player_skill_level),"channel":"system"}}).to_string();
+        state.send_to(&player_id, &msg);
+        return;
+    }
+
+    // Calculate yield
+    let mut rng = rand::thread_rng();
+    let level_bonus = (player_skill_level as f64 / 10.0).floor() as u32;
+    let quantity = (base_yield + rng.gen_range(0..=2) + level_bonus).max(1);
+
+    // Create main resource item
+    let item = Item::new_material(resource_name, rarity, quantity);
+    let mut gathered_items = vec![json!({
+        "name": resource_name,
+        "icon": icon,
+        "quantity": quantity,
+        "rarity": rarity,
+    })];
+
+    // 10% chance for bonus rare drop (one rarity tier higher)
+    let bonus_drop: Option<Item> = if rng.gen_range(0..100) < 10 {
+        let bonus_rarity = (rarity + 1).min(5);
+        // Find a resource with that rarity
+        let bonus_node = MINING_NODES.iter()
+            .find(|(_, _, r, _, _, _)| *r == bonus_rarity);
+        if let Some((_, bonus_icon, br, _, bonus_name, _)) = bonus_node {
+            gathered_items.push(json!({
+                "name": bonus_name,
+                "icon": bonus_icon,
+                "quantity": 1,
+                "rarity": br,
+            }));
+            Some(Item::new_material(bonus_name, *br, 1))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // Grant XP
+    let xp_gained = 10 * (rarity as u64 + 1);
+
+    // Apply to player
+    let (new_level, leveled_up) = {
+        let mut player = match state.players.get_mut(&player_id) {
+            Some(p) => p,
+            None => return,
+        };
+
+        // Update cooldown
+        player.last_gather_tick = now_ms;
+
+        // Add items to inventory
+        let added = player.add_item(item);
+        if !added {
+            let msg = json!({"type": MSG_CHAT_MESSAGE, "payload": {"sender":"System","text":"❌ Inventory full!","channel":"system"}}).to_string();
+            drop(player);
+            state.send_to(&player_id, &msg);
+            return;
+        }
+        if let Some(bonus) = bonus_drop {
+            player.add_item(bonus);
+        }
+
+        // Grant XP and check level up
+        let max_level: u32 = 30;
+        let old_level;
+        if is_mining {
+            player.mining_xp += xp_gained;
+            old_level = player.mining_level;
+            let xp_needed = 100 * player.mining_level as u64;
+            while player.mining_xp >= xp_needed && player.mining_level < max_level {
+                player.mining_xp -= 100 * player.mining_level as u64;
+                player.mining_level += 1;
+            }
+            (player.mining_level, player.mining_level > old_level)
+        } else {
+            player.gathering_xp += xp_gained;
+            old_level = player.gathering_level;
+            let xp_needed = 100 * player.gathering_level as u64;
+            while player.gathering_xp >= xp_needed && player.gathering_level < max_level {
+                player.gathering_xp -= 100 * player.gathering_level as u64;
+                player.gathering_level += 1;
+            }
+            (player.gathering_level, player.gathering_level > old_level)
+        }
+    };
+
+    // Send gather result
+    let (mining_lvl, gathering_lvl, mining_xp_val, gathering_xp_val) = {
+        let player = match state.players.get(&player_id) {
+            Some(p) => p,
+            None => return,
+        };
+        (player.mining_level, player.gathering_level, player.mining_xp, player.gathering_xp)
+    };
+
+    let result_msg = json!({
+        "type": MSG_GATHER_RESULT,
+        "payload": {
+            "items": gathered_items,
+            "xpGained": xp_gained,
+            "miningLevel": mining_lvl,
+            "gatheringLevel": gathering_lvl,
+            "miningXp": mining_xp_val,
+            "gatheringXp": gathering_xp_val,
+        }
+    }).to_string();
+    state.send_to(&player_id, &result_msg);
+
+    // Send inventory update
+    send_inventory_update(state, &player_id);
+    update_daily_quest_progress(state, &player_id, "mine_nodes", 1);
+
+    if leveled_up {
+        let skill_name = if is_mining { "Mining" } else { "Gathering" };
+        let chat_msg = json!({"type": MSG_CHAT_MESSAGE, "payload": {"sender":"System","text": format!("⬆️ {} leveled up to {}!", skill_name, new_level),"channel":"system"}}).to_string();
+        state.send_to(&player_id, &chat_msg);
     }
 }
 
@@ -4454,6 +5647,12 @@ fn send_stats_update(state: &Arc<AppState>, player: &PlayerData) {
             "statPoints": player.stat_points,
             "class": player.class,
             "setBonuses": active_sets,
+            "miningLevel": player.mining_level,
+            "miningXp": player.mining_xp,
+            "gatheringLevel": player.gathering_level,
+            "gatheringXp": player.gathering_xp,
+            "stamina": player.stamina_minutes,
+            "blessings": player.blessings,
         }
     }).to_string();
     state.send_to(&player.id, &stats_msg);
@@ -4544,6 +5743,7 @@ fn check_and_apply_level_up(player: &mut PlayerData, state: &Arc<AppState>) -> b
         // Full heal on level up
         player.hp = player.max_hp;
         player.mp = player.max_mp;
+        check_title_unlocks(player);
 
         let level_msg = json!({
             "type": MSG_LEVEL_UP,
@@ -4556,6 +5756,431 @@ fn check_and_apply_level_up(player: &mut PlayerData, state: &Arc<AppState>) -> b
     }
 
     leveled
+}
+
+/// Check and unlock titles based on player stats. Mutates PlayerData directly —
+/// safe to call while holding a DashMap get_mut guard (does no DashMap access).
+fn check_title_unlocks(player: &mut PlayerData) -> Vec<String> {
+    let mut newly_unlocked = Vec::new();
+
+    let checks: &[(&str, bool)] = &[
+        ("novice",     player.level >= 5),
+        ("adventurer", player.level >= 10),
+        ("veteran",    player.level >= 25),
+        ("champion",   player.level >= 50),
+        ("legend",     player.level >= 100),
+        ("artisan",    player.crafts_count >= 100),
+        ("merchant",   player.gold >= 100_000),
+        ("angler",     player.fish_caught >= 50),
+        ("collector",  {
+            let unique_count = player.inventory.iter()
+                .filter_map(|slot| slot.as_ref())
+                .map(|item| item.template_id.as_str())
+                .collect::<HashSet<&str>>()
+                .len();
+            unique_count >= 50
+        }),
+    ];
+
+    for &(title_id, condition) in checks {
+        if condition && !player.unlocked_titles.iter().any(|t| t == title_id) {
+            player.unlocked_titles.push(title_id.to_string());
+            newly_unlocked.push(title_id.to_string());
+        }
+    }
+
+    newly_unlocked
+}
+
+/// Send a MSG_TITLE_UPDATE to the player with their current title state.
+fn send_title_update(state: &Arc<AppState>, player_id: &Uuid) {
+    if let Some(player) = state.players.get(player_id) {
+        let titles_info: Vec<serde_json::Value> = protocol::TITLES.iter().map(|(id, display, desc)| {
+            json!({
+                "id": id,
+                "name": display,
+                "description": desc,
+                "unlocked": player.unlocked_titles.iter().any(|t| t == id),
+            })
+        }).collect();
+        let msg = json!({
+            "type": MSG_TITLE_UPDATE,
+            "payload": {
+                "activeTitle": player.active_title,
+                "unlockedTitles": player.unlocked_titles,
+                "titles": titles_info,
+            }
+        }).to_string();
+        state.send_to(player_id, &msg);
+    }
+}
+
+fn handle_set_title(state: &Arc<AppState>, player_id: Uuid, payload: &serde_json::Value) {
+    let title_id = match payload.get("titleId").and_then(|v| v.as_str()) {
+        Some(t) => t,
+        None => return,
+    };
+
+    // Allow clearing the active title by passing ""
+    if title_id.is_empty() {
+        if let Some(mut player) = state.players.get_mut(&player_id) {
+            player.active_title = String::new();
+        }
+        send_title_update(state, &player_id);
+        return;
+    }
+
+    // Validate title exists in the catalog
+    if !protocol::TITLES.iter().any(|(id, _, _)| *id == title_id) {
+        let msg = json!({"type": MSG_CHAT_MESSAGE, "payload": {"sender":"System","text":"Unknown title.","channel":"system"}}).to_string();
+        state.send_to(&player_id, &msg);
+        return;
+    }
+
+    if let Some(mut player) = state.players.get_mut(&player_id) {
+        if player.unlocked_titles.iter().any(|t| t == title_id) {
+            player.active_title = title_id.to_string();
+        } else {
+            drop(player);
+            let msg = json!({"type": MSG_CHAT_MESSAGE, "payload": {"sender":"System","text":"You haven't unlocked that title yet.","channel":"system"}}).to_string();
+            state.send_to(&player_id, &msg);
+            return;
+        }
+    }
+
+    send_title_update(state, &player_id);
+}
+
+fn handle_leaderboard_request(state: &Arc<AppState>, player_id: Uuid) {
+    // Collect all online players' stats for leaderboard
+    let mut level_entries = Vec::new();
+    let mut kill_entries = Vec::new();
+    let mut gold_entries = Vec::new();
+    let mut achievement_entries = Vec::new();
+
+    for entry in state.players.iter() {
+        let p = entry.value();
+        let name = p.username.clone();
+        let class_name = p.class.clone();
+        level_entries.push(json!({"name": name, "class": class_name, "value": p.level}));
+        kill_entries.push(json!({"name": name, "class": class_name, "value": p.stats_tracker.enemies_killed}));
+        gold_entries.push(json!({"name": name, "class": class_name, "value": p.gold}));
+        let ach_count = p.achievements.len();
+        achievement_entries.push(json!({"name": name, "class": class_name, "value": ach_count}));
+    }
+
+    // Sort descending by value
+    level_entries.sort_by(|a, b| b["value"].as_u64().unwrap_or(0).cmp(&a["value"].as_u64().unwrap_or(0)));
+    kill_entries.sort_by(|a, b| b["value"].as_u64().unwrap_or(0).cmp(&a["value"].as_u64().unwrap_or(0)));
+    gold_entries.sort_by(|a, b| b["value"].as_u64().unwrap_or(0).cmp(&a["value"].as_u64().unwrap_or(0)));
+    achievement_entries.sort_by(|a, b| b["value"].as_u64().unwrap_or(0).cmp(&a["value"].as_u64().unwrap_or(0)));
+
+    // Top 20
+    level_entries.truncate(20);
+    kill_entries.truncate(20);
+    gold_entries.truncate(20);
+    achievement_entries.truncate(20);
+
+    let msg = json!({
+        "type": MSG_LEADERBOARD_DATA,
+        "payload": {
+            "level": level_entries,
+            "kills": kill_entries,
+            "gold": gold_entries,
+            "achievements": achievement_entries,
+        }
+    }).to_string();
+    state.send_to(&player_id, &msg);
+}
+
+// ─── Auction House Handler ──────────────────────────────────
+
+fn handle_auction_action(state: &Arc<AppState>, player_id: Uuid, payload: &serde_json::Value) {
+    let action = payload.get("action").and_then(|v| v.as_str()).unwrap_or("");
+
+    match action {
+        "list" => {
+            // List an item from inventory for sale
+            let slot_index = match payload.get("slotIndex").and_then(|v| v.as_u64()) {
+                Some(i) => i as usize,
+                None => return,
+            };
+            let price = match payload.get("price").and_then(|v| v.as_u64()) {
+                Some(p) if p > 0 => p,
+                _ => return,
+            };
+
+            // Check listing limit
+            let player_listings: usize = state.auction_listings.iter()
+                .filter(|e| e.value().seller_id == player_id)
+                .count();
+            if player_listings >= AUCTION_MAX_LISTINGS {
+                let msg = json!({
+                    "type": MSG_CHAT_MESSAGE,
+                    "payload": { "sender": "Auction", "text": format!("Max {} active listings!", AUCTION_MAX_LISTINGS), "channel": "system" }
+                }).to_string();
+                state.send_to(&player_id, &msg);
+                return;
+            }
+
+            // Calculate listing fee (5% of price, minimum 1 gold)
+            let fee = ((price as f64 * AUCTION_TAX_RATE).ceil() as u64).max(1);
+
+            // Extract item and deduct fee
+            let (item, seller_name) = {
+                let mut player = match state.players.get_mut(&player_id) {
+                    Some(p) => p,
+                    None => return,
+                };
+                if player.gold < fee {
+                    drop(player);
+                    let msg = json!({
+                        "type": MSG_CHAT_MESSAGE,
+                        "payload": { "sender": "Auction", "text": format!("Need {}g listing fee!", fee), "channel": "system" }
+                    }).to_string();
+                    state.send_to(&player_id, &msg);
+                    return;
+                }
+                if slot_index >= player.inventory.len() { return; }
+                let item = match player.inventory[slot_index].take() {
+                    Some(i) => i,
+                    None => return,
+                };
+                player.gold -= fee;
+                (item, player.username.clone())
+            };
+
+            let tick = state.tick_count.load(std::sync::atomic::Ordering::Relaxed);
+            let listing = AuctionListing {
+                id: Uuid::new_v4(),
+                seller_id: player_id,
+                seller_name: seller_name.clone(),
+                item: item.clone(),
+                price,
+                listed_at: tick,
+                duration: AUCTION_DURATION_TICKS,
+            };
+            let listing_id = listing.id;
+            state.auction_listings.insert(listing_id, listing);
+
+            // Update inventory
+            send_inventory_update(state, &player_id);
+
+            let msg = json!({
+                "type": MSG_CHAT_MESSAGE,
+                "payload": { "sender": "Auction", "text": format!("Listed {} for {}g ({}g fee)", item.name, price, fee), "channel": "system" }
+            }).to_string();
+            state.send_to(&player_id, &msg);
+
+            // Broadcast to trade channel
+            let trade_msg = json!({
+                "type": MSG_CHAT_MESSAGE,
+                "payload": { "sender": "Trade", "text": format!("{} listed {} for {}g on the Auction House!", seller_name, item.name, price), "channel": "trade" }
+            }).to_string();
+            state.broadcast(&trade_msg);
+
+            // Send updated listings to player
+            send_auction_listings(state, &player_id, None);
+            update_daily_quest_progress(state, &player_id, "auction_list", 1);
+        }
+
+        "buy" => {
+            let listing_id = match payload.get("listingId").and_then(|v| v.as_str()).and_then(|s| Uuid::parse_str(s).ok()) {
+                Some(id) => id,
+                None => return,
+            };
+
+            // Remove listing atomically
+            let listing = match state.auction_listings.remove(&listing_id) {
+                Some((_, l)) => l,
+                None => {
+                    let msg = json!({
+                        "type": MSG_CHAT_MESSAGE,
+                        "payload": { "sender": "Auction", "text": "Item no longer available!", "channel": "system" }
+                    }).to_string();
+                    state.send_to(&player_id, &msg);
+                    return;
+                }
+            };
+
+            // Can't buy your own listing
+            if listing.seller_id == player_id {
+                state.auction_listings.insert(listing_id, listing);
+                let msg = json!({
+                    "type": MSG_CHAT_MESSAGE,
+                    "payload": { "sender": "Auction", "text": "Can't buy your own listing!", "channel": "system" }
+                }).to_string();
+                state.send_to(&player_id, &msg);
+                return;
+            }
+
+            // Check gold
+            {
+                let buyer = match state.players.get(&player_id) {
+                    Some(p) => p,
+                    None => { state.auction_listings.insert(listing_id, listing); return; }
+                };
+                if buyer.gold < listing.price {
+                    drop(buyer);
+                    state.auction_listings.insert(listing_id, listing);
+                    let msg = json!({
+                        "type": MSG_CHAT_MESSAGE,
+                        "payload": { "sender": "Auction", "text": "Not enough gold!", "channel": "system" }
+                    }).to_string();
+                    state.send_to(&player_id, &msg);
+                    return;
+                }
+            }
+
+            // Transfer: deduct gold from buyer, add item
+            {
+                let mut buyer = state.players.get_mut(&player_id).unwrap();
+                buyer.gold -= listing.price;
+                // Find free inventory slot
+                let free_slot = buyer.inventory.iter().position(|s| s.is_none());
+                if let Some(idx) = free_slot {
+                    buyer.inventory[idx] = Some(listing.item.clone());
+                } else {
+                    // Inventory full — refund
+                    buyer.gold += listing.price;
+                    drop(buyer);
+                    state.auction_listings.insert(listing_id, listing);
+                    let msg = json!({
+                        "type": MSG_CHAT_MESSAGE,
+                        "payload": { "sender": "Auction", "text": "Inventory full!", "channel": "system" }
+                    }).to_string();
+                    state.send_to(&player_id, &msg);
+                    return;
+                }
+            }
+
+            // Give gold to seller (if online)
+            if let Some(mut seller) = state.players.get_mut(&listing.seller_id) {
+                seller.gold += listing.price;
+                drop(seller);
+                send_stats_update_by_id(state, &listing.seller_id);
+                let msg = json!({
+                    "type": MSG_CHAT_MESSAGE,
+                    "payload": { "sender": "Auction", "text": format!("Your {} sold for {}g!", listing.item.name, listing.price), "channel": "system" }
+                }).to_string();
+                state.send_to(&listing.seller_id, &msg);
+            }
+
+            send_inventory_update(state, &player_id);
+
+            let msg = json!({
+                "type": MSG_CHAT_MESSAGE,
+                "payload": { "sender": "Auction", "text": format!("Bought {} for {}g!", listing.item.name, listing.price), "channel": "system" }
+            }).to_string();
+            state.send_to(&player_id, &msg);
+
+            send_auction_listings(state, &player_id, None);
+        }
+
+        "cancel" => {
+            let listing_id = match payload.get("listingId").and_then(|v| v.as_str()).and_then(|s| Uuid::parse_str(s).ok()) {
+                Some(id) => id,
+                None => return,
+            };
+
+            // Only owner can cancel
+            let listing = match state.auction_listings.remove(&listing_id) {
+                Some((_, l)) if l.seller_id == player_id => l,
+                Some((_, l)) => {
+                    state.auction_listings.insert(listing_id, l);
+                    return;
+                }
+                None => return,
+            };
+
+            // Return item to inventory
+            {
+                let mut player = match state.players.get_mut(&player_id) {
+                    Some(p) => p,
+                    None => return,
+                };
+                let free_slot = player.inventory.iter().position(|s| s.is_none());
+                if let Some(idx) = free_slot {
+                    player.inventory[idx] = Some(listing.item.clone());
+                } else {
+                    drop(player);
+                    state.auction_listings.insert(listing_id, listing);
+                    let msg = json!({
+                        "type": MSG_CHAT_MESSAGE,
+                        "payload": { "sender": "Auction", "text": "Inventory full! Can't cancel.", "channel": "system" }
+                    }).to_string();
+                    state.send_to(&player_id, &msg);
+                    return;
+                }
+            }
+
+            send_inventory_update(state, &player_id);
+            let msg = json!({
+                "type": MSG_CHAT_MESSAGE,
+                "payload": { "sender": "Auction", "text": format!("Cancelled listing: {}", listing.item.name), "channel": "system" }
+            }).to_string();
+            state.send_to(&player_id, &msg);
+            send_auction_listings(state, &player_id, None);
+        }
+
+        "search" | "browse" => {
+            let category = payload.get("category").and_then(|v| v.as_str());
+            send_auction_listings(state, &player_id, category);
+        }
+
+        _ => {}
+    }
+}
+
+fn send_auction_listings(state: &Arc<AppState>, player_id: &Uuid, category: Option<&str>) {
+    let tick = state.tick_count.load(std::sync::atomic::Ordering::Relaxed);
+    let mut listings: Vec<serde_json::Value> = Vec::new();
+    let mut my_listings: Vec<serde_json::Value> = Vec::new();
+
+    for entry in state.auction_listings.iter() {
+        let l = entry.value();
+        // Skip expired
+        if tick - l.listed_at > l.duration { continue; }
+
+        // Filter by category
+        if let Some(cat) = category {
+            let matches = match cat {
+                "weapon" | "Weapon" => l.item.item_type == ItemType::Weapon,
+                "armor" | "Armor" => l.item.item_type == ItemType::Armor,
+                "consumable" | "Consumable" => l.item.item_type == ItemType::Consumable,
+                "material" | "Material" => l.item.item_type == ItemType::Material,
+                "all" => true,
+                _ => true,
+            };
+            if !matches { continue; }
+        }
+
+        let entry_json = json!({
+            "id": l.id.to_string(),
+            "item": l.item.to_payload(),
+            "price": l.price,
+            "seller": l.seller_name,
+            "timeLeft": ((l.duration as i64) - (tick as i64 - l.listed_at as i64)).max(0),
+        });
+
+        if l.seller_id == *player_id {
+            my_listings.push(entry_json);
+        } else {
+            listings.push(entry_json);
+        }
+    }
+
+    // Sort by price ascending
+    listings.sort_by(|a, b| a["price"].as_u64().unwrap_or(0).cmp(&b["price"].as_u64().unwrap_or(0)));
+
+    let msg = json!({
+        "type": MSG_AUCTION_DATA,
+        "payload": {
+            "listings": listings,
+            "myListings": my_listings,
+        }
+    }).to_string();
+    state.send_to(player_id, &msg);
 }
 
 fn send_inventory_update(state: &Arc<AppState>, player_id: &Uuid) {
@@ -4867,6 +6492,14 @@ fn tick_player_effects(state: &Arc<AppState>) {
             player.dead = true;
             player.respawn_timer = 100.0; // 5 seconds
         }
+
+        // Combo timer decay
+        if player.combo_timer > 0.0 {
+            player.combo_timer -= 1.0;
+            if player.combo_timer <= 0.0 {
+                player.combo_count = 0;
+            }
+        }
     }
 
     // Send effect tick events to clients
@@ -4955,6 +6588,50 @@ static OBJ_REACH_20: &[QuestObjectiveDef] = &[
 ];
 static OBJ_BOSS_HUNTER: &[QuestObjectiveDef] = &[
     QuestObjectiveDef { description: "Kill a boss-rank enemy", obj_type: "kill_rank", target: "boss", count: 1 },
+];
+
+// ── New quest objectives ──
+static OBJ_FISHERMAN: &[QuestObjectiveDef] = &[
+    QuestObjectiveDef { description: "Catch 5 fish", obj_type: "craft", target: "", count: 5 },
+];
+static OBJ_MASTER_ANGLER: &[QuestObjectiveDef] = &[
+    QuestObjectiveDef { description: "Catch 25 fish", obj_type: "craft", target: "", count: 25 },
+];
+static OBJ_GOBLIN_MENACE: &[QuestObjectiveDef] = &[
+    QuestObjectiveDef { description: "Kill 15 Goblins", obj_type: "kill_type", target: "goblin", count: 15 },
+];
+static OBJ_WOLF_PACK: &[QuestObjectiveDef] = &[
+    QuestObjectiveDef { description: "Kill 10 Wolves", obj_type: "kill_type", target: "wolf", count: 10 },
+];
+static OBJ_SPIDER_NEST: &[QuestObjectiveDef] = &[
+    QuestObjectiveDef { description: "Kill 20 Spiders", obj_type: "kill_type", target: "spider", count: 20 },
+];
+static OBJ_DRAGON_SLAYER: &[QuestObjectiveDef] = &[
+    QuestObjectiveDef { description: "Kill 3 Dragons", obj_type: "kill_type", target: "dragon", count: 3 },
+];
+static OBJ_COLLECT_IRON: &[QuestObjectiveDef] = &[
+    QuestObjectiveDef { description: "Collect 20 Iron Ore", obj_type: "collect", target: "iron", count: 20 },
+];
+static OBJ_COLLECT_GOLD_ORE: &[QuestObjectiveDef] = &[
+    QuestObjectiveDef { description: "Collect 10 Gold Ore", obj_type: "collect", target: "gold", count: 10 },
+];
+static OBJ_REACH_30: &[QuestObjectiveDef] = &[
+    QuestObjectiveDef { description: "Reach level 30", obj_type: "level", target: "30", count: 1 },
+];
+static OBJ_REACH_50: &[QuestObjectiveDef] = &[
+    QuestObjectiveDef { description: "Reach level 50", obj_type: "level", target: "50", count: 1 },
+];
+static OBJ_MASS_SLAYER: &[QuestObjectiveDef] = &[
+    QuestObjectiveDef { description: "Kill 100 enemies", obj_type: "kill", target: "", count: 100 },
+];
+static OBJ_CRAFT_MASTERY: &[QuestObjectiveDef] = &[
+    QuestObjectiveDef { description: "Craft 25 items", obj_type: "craft", target: "", count: 25 },
+];
+static OBJ_UNDEAD_PURGE: &[QuestObjectiveDef] = &[
+    QuestObjectiveDef { description: "Kill 30 undead enemies", obj_type: "kill_type", target: "skeleton", count: 30 },
+];
+static OBJ_DEMON_HUNTER: &[QuestObjectiveDef] = &[
+    QuestObjectiveDef { description: "Kill 10 Demons", obj_type: "kill_type", target: "demon", count: 10 },
 ];
 
 static QUEST_CATALOG: &[QuestDef] = &[
@@ -5065,6 +6742,119 @@ static QUEST_CATALOG: &[QuestDef] = &[
         icon: "👑", min_level: 15, prerequisites: &["first_blood"],
         objectives: OBJ_BOSS_HUNTER,
         reward_xp: 3000, reward_gold: 2000, reward_items: &[("Dragon Sword", 3, 15)],
+    },
+    // ── New Quests ──
+    QuestDef {
+        id: "goblin_menace", title: "Goblin Menace",
+        description: "The goblins are raiding trade routes. Thin their numbers!",
+        icon: "👺", min_level: 5, prerequisites: &["first_blood"],
+        objectives: OBJ_GOBLIN_MENACE,
+        reward_xp: 800, reward_gold: 400, reward_items: &[("Goblin Dagger", 1, 5)],
+    },
+    QuestDef {
+        id: "wolf_pack", title: "Wolf Pack",
+        description: "Wolves terrorize travelers. Hunt them down.",
+        icon: "🐺", min_level: 4, prerequisites: &["first_blood"],
+        objectives: OBJ_WOLF_PACK,
+        reward_xp: 600, reward_gold: 300, reward_items: &[("Wolf Pelt Cloak", 1, 4)],
+    },
+    QuestDef {
+        id: "spider_nest", title: "Spider's Nest",
+        description: "Clear the spider nest threatening the Eastern Outpost.",
+        icon: "🕷️", min_level: 8, prerequisites: &["slime_hunter"],
+        objectives: OBJ_SPIDER_NEST,
+        reward_xp: 1200, reward_gold: 600, reward_items: &[("Spider Silk Robe", 2, 8)],
+    },
+    QuestDef {
+        id: "fisherman", title: "Gone Fishin'",
+        description: "Learn the art of fishing. Catch your first haul!",
+        icon: "🎣", min_level: 1, prerequisites: &[],
+        objectives: OBJ_FISHERMAN,
+        reward_xp: 200, reward_gold: 100, reward_items: &[],
+    },
+    QuestDef {
+        id: "master_angler", title: "Master Angler",
+        description: "Become a legendary fisherman. The sea holds many treasures!",
+        icon: "🐟", min_level: 5, prerequisites: &["fisherman"],
+        objectives: OBJ_MASTER_ANGLER,
+        reward_xp: 1500, reward_gold: 800, reward_items: &[("Golden Fishing Rod", 2, 10)],
+    },
+    QuestDef {
+        id: "iron_collector", title: "Iron Will",
+        description: "The blacksmiths need iron. Gather ore from the mines.",
+        icon: "⛏️", min_level: 6, prerequisites: &["gathering_wood"],
+        objectives: OBJ_COLLECT_IRON,
+        reward_xp: 700, reward_gold: 350, reward_items: &[("Iron Helm", 1, 6)],
+    },
+    QuestDef {
+        id: "gold_prospector", title: "Gold Prospector",
+        description: "Rare gold veins have been spotted. Collect precious ore!",
+        icon: "✨", min_level: 12, prerequisites: &["iron_collector"],
+        objectives: OBJ_COLLECT_GOLD_ORE,
+        reward_xp: 1500, reward_gold: 1000, reward_items: &[("Gold Ring", 2, 12)],
+    },
+    QuestDef {
+        id: "dragon_slayer", title: "Dragon Slayer",
+        description: "The ultimate warrior quest: face the dragons in their lair.",
+        icon: "🐉", min_level: 20, prerequisites: &["boss_hunter"],
+        objectives: OBJ_DRAGON_SLAYER,
+        reward_xp: 5000, reward_gold: 3000, reward_items: &[("Dragon Scale Shield", 4, 25)],
+    },
+    QuestDef {
+        id: "champion_hunter", title: "Champion of Champions",
+        description: "Prove your worth by defeating 10 champion-rank foes.",
+        icon: "🏆", min_level: 12, prerequisites: &["skeleton_scourge"],
+        objectives: OBJ_CHAMPION_HUNTER,
+        reward_xp: 2000, reward_gold: 1200, reward_items: &[("Champion's Amulet", 3, 15)],
+    },
+    QuestDef {
+        id: "reach_30", title: "Veteran Adventurer",
+        description: "Reach level 30 to become a seasoned veteran.",
+        icon: "⭐", min_level: 20, prerequisites: &["reach_20"],
+        objectives: OBJ_REACH_30,
+        reward_xp: 3000, reward_gold: 2000, reward_items: &[("Veteran's Ring", 3, 30)],
+    },
+    QuestDef {
+        id: "reach_50", title: "Legendary Hero",
+        description: "Attain the legendary rank of level 50!",
+        icon: "🌟", min_level: 30, prerequisites: &["reach_30"],
+        objectives: OBJ_REACH_50,
+        reward_xp: 10000, reward_gold: 5000, reward_items: &[("Hero's Crown", 4, 50)],
+    },
+    QuestDef {
+        id: "mass_slayer", title: "One Hundred Foes",
+        description: "A true warrior has defeated at least 100 enemies.",
+        icon: "💀", min_level: 10, prerequisites: &["first_blood"],
+        objectives: OBJ_MASS_SLAYER,
+        reward_xp: 2500, reward_gold: 1500, reward_items: &[],
+    },
+    QuestDef {
+        id: "gold_hoarder", title: "Gold Hoarder",
+        description: "Accumulate wealth. A merchant's dream!",
+        icon: "💰", min_level: 8, prerequisites: &[],
+        objectives: OBJ_GOLD_HOARDER,
+        reward_xp: 1000, reward_gold: 500, reward_items: &[("Lucky Coin", 2, 8)],
+    },
+    QuestDef {
+        id: "craft_mastery", title: "Master Crafter",
+        description: "Master the art of crafting by creating 25 items.",
+        icon: "🔨", min_level: 5, prerequisites: &["craft_basics"],
+        objectives: OBJ_CRAFT_MASTERY,
+        reward_xp: 1500, reward_gold: 800, reward_items: &[("Artisan's Hammer", 2, 10)],
+    },
+    QuestDef {
+        id: "undead_purge", title: "Undead Purge",
+        description: "Cleanse the catacombs of the undead scourge.",
+        icon: "☠️", min_level: 10, prerequisites: &["skeleton_scourge"],
+        objectives: OBJ_UNDEAD_PURGE,
+        reward_xp: 2000, reward_gold: 1000, reward_items: &[("Holy Water", 2, 10)],
+    },
+    QuestDef {
+        id: "demon_hunter", title: "Demon Hunter",
+        description: "Dark forces stir in the Infernal Wastes. Banish them!",
+        icon: "😈", min_level: 18, prerequisites: &["elite_slayer"],
+        objectives: OBJ_DEMON_HUNTER,
+        reward_xp: 3000, reward_gold: 2000, reward_items: &[("Demon Fang Blade", 3, 20)],
     },
 ];
 
@@ -5349,6 +7139,15 @@ fn check_achievements(state: &Arc<AppState>, player_id: Uuid) {
                 "trades_completed" => player.stats_tracker.trades_completed,
                 "gold_earned" => player.stats_tracker.gold_earned as u32,
                 "level" => player.level,
+                "fish_caught" => player.fish_caught,
+                "items_enchanted" => player.items_enchanted,
+                "guilds_joined" => player.guilds_joined,
+                "guilds_created" => player.guilds_created,
+                "bosses_killed" => player.bosses_killed,
+                "max_login_streak" => player.max_login_streak,
+                "faction_friendly_count" => player.faction_friendly_count,
+                "faction_honored_count" => player.faction_honored_count,
+                "faction_exalted_count" => player.faction_exalted_count,
                 _ => 0,
             };
 
@@ -5434,6 +7233,60 @@ fn handle_npc_interact(state: &Arc<AppState>, player_id: Uuid, npc_id: &str) {
             ],
             "actions": [{ "label": "Enter Arena", "action": "arena" }],
         }),
+        "temple_priest" | "priest" => {
+            // Buy next available blessing (bitmask-based)
+            let bless_cost = 500_u64;
+            let current_blessings = state.players.get(&player_id).map(|p| p.blessings).unwrap_or(0);
+            let blessing_count = current_blessings.count_ones();
+
+            if blessing_count >= 5 {
+                let msg = json!({
+                    "type": MSG_CHAT_MESSAGE,
+                    "payload": { "sender": "Temple", "text": "You already have all 5 blessings.", "channel": "system" }
+                }).to_string();
+                state.send_to(&player_id, &msg);
+            } else {
+                let can_afford = state.players.get(&player_id).map(|p| p.gold >= bless_cost).unwrap_or(false);
+                if can_afford {
+                    if let Some(mut p) = state.players.get_mut(&player_id) {
+                        // Find next unowned blessing bit
+                        let mut next_bit = 0u8;
+                        for i in 0..5u8 {
+                            if p.blessings & (1 << i) == 0 {
+                                next_bit = i;
+                                break;
+                            }
+                        }
+                        p.gold -= bless_cost;
+                        p.blessings |= 1 << next_bit;
+                        let b = p.blessings.count_ones();
+                        drop(p);
+                        send_stats_update_by_id(state, &player_id);
+                        let msg = json!({
+                            "type": MSG_CHAT_MESSAGE,
+                            "payload": { "sender": "Temple", "text": format!("Blessing received ({}/5). Death penalty reduced.", b), "channel": "system" }
+                        }).to_string();
+                        state.send_to(&player_id, &msg);
+                    }
+                } else {
+                    let msg = json!({
+                        "type": MSG_CHAT_MESSAGE,
+                        "payload": { "sender": "Temple", "text": format!("You need {}g for a blessing. ({}/5 blessings)", bless_cost, blessing_count), "channel": "system" }
+                    }).to_string();
+                    state.send_to(&player_id, &msg);
+                }
+            }
+
+            json!({
+                "npcName": "High Priest Auriel",
+                "portrait": "⛪",
+                "lines": [
+                    format!("Blessings protect you from death's toll ({}/5).", blessing_count),
+                    format!("Each blessing reduces death penalties. Cost: {}g.", bless_cost),
+                ],
+                "actions": [{ "label": "Buy Blessing", "action": "bless" }],
+            })
+        }
         _ => json!({
             "npcName": "Villager",
             "portrait": "👤",
@@ -5496,6 +7349,7 @@ fn try_spawn_world_boss(state: &Arc<AppState>, _tick: u64) {
         modifiers: boss_def.modifiers.to_vec(),
         attack_cooldown: 0.0,
         flee_cooldown: 0.0,
+        stun_ticks: 0,
     };
 
     state.enemies.insert(enemy_id, enemy);
@@ -5517,6 +7371,275 @@ fn try_spawn_world_boss(state: &Arc<AppState>, _tick: u64) {
 }
 
 // ─── Game Loop ───────────────────────────────────────────────
+
+fn update_weather(state: &Arc<AppState>, tick: u64) {
+    let weathers = ["clear", "cloudy", "rain", "storm", "fog", "snow"];
+    let icons = ["☀️", "⛅", "🌧️", "⛈️", "🌫️", "❄️"];
+    let idx = ((tick / 2400) % weathers.len() as u64) as usize;
+    let weather = weathers[idx];
+    let icon = icons[idx];
+
+    let msg = json!({
+        "type": protocol::MSG_WEATHER_UPDATE,
+        "payload": {
+            "weather": weather,
+            "icon": icon,
+            "intensity": if weather == "storm" { 0.8 } else if weather == "rain" || weather == "snow" { 0.5 } else { 0.3 },
+        }
+    }).to_string();
+    state.broadcast(&msg);
+}
+
+fn trigger_world_event(state: &Arc<AppState>) {
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    let events = [
+        ("⚔️ Double XP Event!", "All XP gains are doubled for the next 5 minutes!", "double_xp"),
+        ("💰 Gold Rush!", "Enemies drop double gold for the next 5 minutes!", "gold_rush"),
+        ("🌟 Rare Spawn Wave!", "Elite and boss enemies are spawning across the realm!", "rare_spawn"),
+        ("🛡️ Defense Blessing!", "All heroes gain a temporary defense boost!", "defense_buff"),
+        ("⚡ Monster Invasion!", "A wave of powerful monsters has appeared!", "invasion"),
+        ("🎁 Lucky Hour!", "Drop rates increased for the next 5 minutes!", "lucky_hour"),
+        ("🏰 Town Merchants Sale!", "All healing and shops give bonus effects!", "merchant_sale"),
+        ("🔥 Elemental Surge!", "Elemental enemies grow stronger but drop better loot!", "elemental_surge"),
+        ("⭐ Blessing of Stars!", "All XP and gold gains increased by 50%!", "star_blessing"),
+        ("🎯 Hunter's Mark!", "Enemies have reduced HP for the next 5 minutes!", "hunters_mark"),
+        ("💎 Treasure Rain!", "Enemies drop rare materials for the next 5 minutes!", "treasure_rain"),
+        ("🌙 Blood Moon!", "Enemies deal more damage but give triple XP!", "blood_moon"),
+    ];
+    let event = events[rng.gen_range(0..events.len())];
+    
+    let tick = state.tick_count.load(std::sync::atomic::Ordering::Relaxed);
+    let duration = 6000u64; // 5 minutes at 20 tps
+    
+    // Store active world event
+    if let Ok(mut we) = state.active_world_event.write() {
+        *we = Some((event.2, tick + duration));
+    }
+    
+    // Broadcast event announcement
+    let msg = json!({
+        "type": protocol::MSG_CHAT_MESSAGE,
+        "payload": {
+            "sender": "🌍 World Event",
+            "text": format!("{} {}", event.0, event.1),
+            "channel": "system",
+        }
+    }).to_string();
+    state.broadcast(&msg);
+    
+    // Broadcast active event info for HUD display
+    let event_hud_msg = json!({
+        "type": protocol::MSG_WORLD_EVENT_ACTIVE,
+        "payload": {
+            "event_type": event.2,
+            "duration_ms": duration * 50,
+        }
+    }).to_string();
+    state.broadcast(&event_hud_msg);
+    
+    // Apply immediate effects
+    match event.2 {
+        "defense_buff" => {
+            for mut entry in state.players.iter_mut() {
+                let p = entry.value_mut();
+                p.apply_effect(crate::protocol::ActiveEffect::new(
+                    crate::protocol::StatusEffectType::Shield,
+                    15, 6000, 6000, "world_event",
+                ));
+            }
+        }
+        "rare_spawn" => {
+            // Spawn elite + boss enemies near random players
+            let player_positions: Vec<(f64, f64)> = state.players.iter()
+                .filter(|p| !p.dead)
+                .map(|p| (p.x, p.y))
+                .collect();
+            for (px, py) in player_positions.iter().take(8) {
+                for _ in 0..2 {
+                    let ex = px + rng.gen_range(-12.0..12.0);
+                    let ey = py + rng.gen_range(-12.0..12.0);
+                    let zone_level = rng.gen_range(20..45);
+                    let biome = state.world.get_biome(ex, ey);
+                    let mut enemy = crate::enemy::generate_enemy(ex, ey, zone_level, &biome);
+                    if rng.gen_range(0..3) == 0 {
+                        enemy.rank = crate::protocol::EnemyRank::Boss;
+                        enemy.hp = (enemy.hp as f64 * 3.0) as i32;
+                        enemy.atk = (enemy.atk as f64 * 2.0) as i32;
+                    } else {
+                        enemy.rank = crate::protocol::EnemyRank::Elite;
+                        enemy.hp = (enemy.hp as f64 * 2.0) as i32;
+                        enemy.atk = (enemy.atk as f64 * 1.5) as i32;
+                    }
+                    enemy.max_hp = enemy.hp;
+                    enemy.name = format!("⭐ Rare {}", enemy.name);
+                    state.enemies.insert(enemy.id, enemy);
+                }
+            }
+        }
+        "merchant_sale" => {
+            // Heal all alive players to full + give a small buff
+            for mut entry in state.players.iter_mut() {
+                let p = entry.value_mut();
+                if !p.dead {
+                    p.hp = p.max_hp;
+                    p.mp = p.max_mp;
+                    p.apply_effect(crate::protocol::ActiveEffect::new(
+                        crate::protocol::StatusEffectType::Regen,
+                        5, 6000, 6000, "merchant_blessing",
+                    ));
+                }
+            }
+        }
+        "hunters_mark" => {
+            // Reduce HP of all alive enemies by 20%
+            for mut entry in state.enemies.iter_mut() {
+                let e = entry.value_mut();
+                if e.hp > 0 {
+                    let reduction = (e.hp as f64 * 0.2) as i32;
+                    e.hp = (e.hp - reduction).max(1);
+                }
+            }
+        }
+        "blood_moon" => {
+            // Buff all enemies' attack
+            for mut entry in state.enemies.iter_mut() {
+                let e = entry.value_mut();
+                if e.hp > 0 {
+                    e.atk = (e.atk as f64 * 1.5) as i32;
+                }
+            }
+        }
+        "invasion" => {
+            // Spawn extra powerful enemies near random players
+            let player_positions: Vec<(f64, f64)> = state.players.iter()
+                .filter(|p| !p.dead)
+                .map(|p| (p.x, p.y))
+                .collect();
+            for (px, py) in player_positions.iter().take(5) {
+                for _ in 0..3 {
+                    let ex = px + rng.gen_range(-10.0..10.0);
+                    let ey = py + rng.gen_range(-10.0..10.0);
+                    let zone_level = rng.gen_range(15..35);
+                    let biome = state.world.get_biome(ex, ey);
+                    let mut enemy = crate::enemy::generate_enemy(ex, ey, zone_level, &biome);
+                    enemy.rank = crate::protocol::EnemyRank::Elite;
+                    enemy.hp = (enemy.hp as f64 * 1.5) as i32;
+                    enemy.max_hp = enemy.hp;
+                    enemy.atk = (enemy.atk as f64 * 1.3) as i32;
+                    enemy.name = format!("💎 Invader {}", enemy.name);
+                    state.enemies.insert(enemy.id, enemy);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+// ─── Blessing System (Tibia-style bitmask) ──────────────────
+
+fn handle_buy_blessing(state: &Arc<AppState>, player_id: Uuid, payload: &serde_json::Value) {
+    let blessing_id = match payload.get("blessing_id").and_then(|v| v.as_u64()) {
+        Some(id) if id <= 4 => id as u8,
+        _ => {
+            let msg = json!({"type": MSG_CHAT_MESSAGE, "payload": {"sender":"System","text":"Invalid blessing ID (0-4).","channel":"system"}}).to_string();
+            state.send_to(&player_id, &msg);
+            return;
+        }
+    };
+
+    let costs: [u64; 5] = [10000, 15000, 20000, 25000, 50000];
+    let names = ["Adventurer's Blessing", "Spiritual Shielding", "Phoenix Blessing", "Embrace of Tibia", "Twist of Fate"];
+    let cost = costs[blessing_id as usize];
+    let bit = 1u8 << blessing_id;
+
+    let (already_owned, can_afford) = {
+        match state.players.get(&player_id) {
+            Some(p) => (p.blessings & bit != 0, p.gold >= cost),
+            None => return,
+        }
+    };
+
+    if already_owned {
+        let msg = json!({"type": MSG_CHAT_MESSAGE, "payload": {"sender":"Temple","text": format!("You already own {}.", names[blessing_id as usize]),"channel":"system"}}).to_string();
+        state.send_to(&player_id, &msg);
+        return;
+    }
+
+    if !can_afford {
+        let msg = json!({"type": MSG_CHAT_MESSAGE, "payload": {"sender":"Temple","text": format!("{} costs {} gold.", names[blessing_id as usize], cost),"channel":"system"}}).to_string();
+        state.send_to(&player_id, &msg);
+        return;
+    }
+
+    let new_blessings = {
+        if let Some(mut p) = state.players.get_mut(&player_id) {
+            p.gold -= cost;
+            p.blessings |= bit;
+            p.blessings
+        } else {
+            return;
+        }
+    };
+
+    send_stats_update_by_id(state, &player_id);
+    let update_msg = json!({
+        "type": MSG_BLESSING_UPDATE,
+        "payload": { "blessings": new_blessings }
+    }).to_string();
+    state.send_to(&player_id, &update_msg);
+
+    let msg = json!({"type": MSG_CHAT_MESSAGE, "payload": {"sender":"Temple","text": format!("You received {}! ({}/5 blessings active).", names[blessing_id as usize], new_blessings.count_ones()),"channel":"system"}}).to_string();
+    state.send_to(&player_id, &msg);
+}
+
+// ─── Bestiary System (Tibia-style) ──────────────────────────
+
+fn handle_bestiary_request(state: &Arc<AppState>, player_id: Uuid, _payload: &serde_json::Value) {
+    let entries: Vec<serde_json::Value> = {
+        match state.players.get(&player_id) {
+            Some(p) => {
+                p.bestiary.iter().map(|(name, kills)| {
+                    let tier = match *kills {
+                        0..=4 => "unknown",
+                        5..=24 => "basic",
+                        25..=99 => "detailed",
+                        100..=499 => "advanced",
+                        _ => "completed",
+                    };
+                    json!({ "name": name, "kills": kills, "tier": tier })
+                }).collect()
+            }
+            None => return,
+        }
+    };
+
+    let msg = json!({
+        "type": MSG_BESTIARY_DATA,
+        "payload": { "entries": entries }
+    }).to_string();
+    state.send_to(&player_id, &msg);
+}
+
+// ─── Stamina System (Tibia-style) ───────────────────────────
+
+fn update_player_stamina(state: &Arc<AppState>, tick: u64) {
+    for mut entry in state.players.iter_mut() {
+        let player = entry.value_mut();
+        if player.dead { continue; }
+        // Initialize last_stamina_tick on first call
+        if player.last_stamina_tick == 0 {
+            player.last_stamina_tick = tick;
+            continue;
+        }
+        // Deduct 1 stamina minute per 1200 ticks (60 seconds at 20 tps)
+        if tick >= player.last_stamina_tick + 1200 {
+            let elapsed_intervals = (tick - player.last_stamina_tick) / 1200;
+            player.stamina_minutes = player.stamina_minutes.saturating_sub(elapsed_intervals as u32);
+            player.last_stamina_tick = tick;
+        }
+    }
+}
 
 async fn game_loop(state: Arc<AppState>) {
     let tick_duration = Duration::from_millis(50); // 20 ticks/sec
@@ -5585,6 +7708,51 @@ async fn game_loop(state: Arc<AppState>) {
             sync_ground_items_to_players(&state);
         }
 
+        // 8. Weather cycle (every 2400 ticks = 2 minutes)
+        if tick % 2400 == 0 {
+            update_weather(&state, tick);
+        }
+
+        // 9. Random world events (every 6000 ticks = 5 minutes)
+        if tick % 6000 == 0 && tick > 0 {
+            trigger_world_event(&state);
+        }
+
+        // 10. Expire auction listings (every 200 ticks = 10 sec)
+        if tick % 200 == 0 {
+            expire_auction_listings(&state, tick);
+        }
+
+        // 11. Update skull timers (every 20 ticks = 1 sec)
+        if tick % 20 == 0 {
+            update_skull_timers(&state, tick);
+        }
+
+        // 12. Update party buffs (every 40 ticks = 2 sec)
+        if tick % 40 == 0 {
+            update_party_buffs(&state);
+        }
+
+        // 13. Arena matchmaking (every 100 ticks = 5 sec)
+        if tick % 100 == 0 {
+            process_arena_matchmaking(&state);
+        }
+
+        // 14. Daily quest reset check (every 200 ticks = 10 sec)
+        if tick % 200 == 0 {
+            check_daily_reset(&state, tick);
+        }
+
+        // 15. Spawn treasure chests (every 1200 ticks = 60 sec)
+        if tick % 1200 == 0 && tick > 0 {
+            spawn_treasure_chests(&state, tick);
+        }
+
+        // 16. Stamina deduction (every 20 ticks = 1 sec, deduct 1 min per 60s of play via per-player tracking)
+        if tick % 20 == 0 {
+            update_player_stamina(&state, tick);
+        }
+
         let elapsed = tick_start.elapsed();
         if elapsed < tick_duration {
             tokio::time::sleep(tick_duration - elapsed).await;
@@ -5613,6 +7781,64 @@ fn regen_safe_zone_players(state: &Arc<AppState>) {
     }
 }
 
+fn expire_auction_listings(state: &Arc<AppState>, tick: u64) {
+    let mut expired: Vec<(Uuid, AuctionListing)> = Vec::new();
+
+    for entry in state.auction_listings.iter() {
+        let l = entry.value();
+        if tick - l.listed_at > l.duration {
+            expired.push((*entry.key(), l.clone()));
+        }
+    }
+
+    for (id, listing) in expired {
+        state.auction_listings.remove(&id);
+        // Return item to seller if online
+        if let Some(mut seller) = state.players.get_mut(&listing.seller_id) {
+            if let Some(idx) = seller.inventory.iter().position(|s| s.is_none()) {
+                seller.inventory[idx] = Some(listing.item.clone());
+                drop(seller);
+                send_inventory_update(state, &listing.seller_id);
+                let msg = json!({
+                    "type": MSG_CHAT_MESSAGE,
+                    "payload": { "sender": "Auction", "text": format!("Listing expired: {} returned to inventory.", listing.item.name), "channel": "system" }
+                }).to_string();
+                state.send_to(&listing.seller_id, &msg);
+            }
+        }
+    }
+}
+
+fn update_skull_timers(state: &Arc<AppState>, tick: u64) {
+    let mut cleared: Vec<Uuid> = Vec::new();
+
+    for mut entry in state.players.iter_mut() {
+        let player = entry.value_mut();
+        if player.skull_type > 0 {
+            if player.skull_timer > 20 {
+                player.skull_timer -= 20;
+            } else {
+                player.skull_type = 0;
+                player.skull_timer = 0;
+                cleared.push(player.id);
+            }
+        }
+        // Reset daily PvP kill counter every 12000 ticks (~10 min)
+        if tick > player.pvp_day_tick + 12000 {
+            player.pvp_kills_today = 0;
+            player.pvp_day_tick = tick;
+        }
+    }
+
+    for pid in cleared {
+        let msg = json!({
+            "type": MSG_CHAT_MESSAGE,
+            "payload": { "sender": "System", "text": "Your skull has cleared.", "channel": "system" }
+        }).to_string();
+        state.send_to(&pid, &msg);
+    }
+}
+
 fn update_player_movement(state: &Arc<AppState>) {
     let speed: f64 = 3.0 / 20.0; // 3 tiles/sec at 20 tps
 
@@ -5622,7 +7848,8 @@ fn update_player_movement(state: &Arc<AppState>) {
 
         let speed_mult = player.effect_speed_multiplier();
         if speed_mult <= 0.0 { continue; } // Stunned - can't move
-        let effective_speed = speed * speed_mult;
+        let mount_mult = if player.mounted { 1.0 + player.mount_speed_bonus } else { 1.0 };
+        let effective_speed = speed * speed_mult * mount_mult;
 
         let dx = player.target_x - player.x;
         let dy = player.target_y - player.y;
@@ -5648,8 +7875,10 @@ fn update_dead_players(state: &Arc<AppState>) {
         if player.dead {
             player.respawn_timer -= 1.0;
             if player.respawn_timer <= 0.0 {
-                // Death penalty: lose 5% of XP (never go below 0)
-                let xp_loss = (player.xp as f64 * 0.05) as u64;
+                // Death penalty: lose XP, reduced by blessings (bitmask, each reduces by 20%, 5 = no loss)
+                let blessing_count = player.blessings.count_ones() as f64;
+                let xp_loss_rate = (0.05 * (1.0 - blessing_count * 0.20)).max(0.0);
+                let xp_loss = (player.xp as f64 * xp_loss_rate) as u64;
                 player.xp = player.xp.saturating_sub(xp_loss);
 
                 // Find nearest town to death location
@@ -5828,8 +8057,13 @@ fn process_enemy_attacks(state: &Arc<AppState>) {
 
             if let Some(mut player) = state.players.get_mut(&player_id) {
                 let mut rng = rand::thread_rng();
+                // Blessings (bitmask) reduce item drop rate: base 20%, -8% per blessing (min 5%)
+                let base_drop_rate = 0.20_f64;
+                let blessing_count = player.blessings.count_ones() as f64;
+                let blessing_reduction = blessing_count * 0.08;
+                let drop_rate = (base_drop_rate - blessing_reduction).max(0.05);
                 let item_count = player.inventory.iter().filter(|s| s.is_some()).count();
-                let to_drop = ((item_count as f64 * 0.20).ceil() as usize).max(0);
+                let to_drop = ((item_count as f64 * drop_rate).ceil() as usize).max(0);
 
                 if to_drop > 0 {
                     // Collect indices of occupied slots, shuffle, pick first `to_drop`
@@ -5858,9 +8092,19 @@ fn process_enemy_attacks(state: &Arc<AppState>) {
                     }
                 }
 
-                // Also lose 10% of gold
-                let gold_loss = player.gold / 10;
+                // Gold loss reduced by blessings (bitmask): base 10%, -2% per blessing (min 2%)
+                let gold_loss_rate = (0.10 - player.blessings.count_ones() as f64 * 0.02).max(0.02);
+                let gold_loss = (player.gold as f64 * gold_loss_rate) as u64;
                 player.gold = player.gold.saturating_sub(gold_loss);
+
+                // Consume blessings on death: Twist of Fate (bit4) preserves other blessings
+                if player.blessings > 0 {
+                    if player.blessings & (1 << 4) != 0 {
+                        player.blessings &= !(1 << 4);
+                    } else {
+                        player.blessings = 0;
+                    }
+                }
 
                 player.dead = true;
                 player.hp = 0;
@@ -5929,6 +8173,22 @@ fn update_enemies(state: &Arc<AppState>) {
 
     for mut entry in state.enemies.iter_mut() {
         update_enemy_ai(entry.value_mut(), &players, dt);
+    }
+
+    // Pack aggro: champion+ enemies pulling nearby idle enemies into chase
+    let enemy_snapshot: Vec<(Uuid, f64, f64, protocol::EnemyState, Option<Uuid>, protocol::EnemyRank)> =
+        state.enemies.iter().map(|e| {
+            let v = e.value();
+            (*e.key(), v.x, v.y, v.state.clone(), v.target_player, v.rank.clone())
+        }).collect();
+    let pack_pairs = compute_pack_aggro(&enemy_snapshot);
+    for (eid, target_id) in pack_pairs {
+        if let Some(mut enemy) = state.enemies.get_mut(&eid) {
+            if enemy.state == protocol::EnemyState::Idle || enemy.state == protocol::EnemyState::Patrol {
+                enemy.state = protocol::EnemyState::Chase;
+                enemy.target_player = Some(target_id);
+            }
+        }
     }
 }
 
@@ -6014,9 +8274,948 @@ fn respawn_enemies(state: &Arc<AppState>) {
             let cy = bcy + rng.gen_range(-3..=3);
             let spawns = state.world.get_enemy_spawns(cx, cy);
             if let Some(&(x, y, zone_level)) = spawns.first() {
-                let enemy = generate_enemy(x, y, zone_level);
+                let biome = state.world.get_biome(x, y);
+                let enemy = generate_enemy(x, y, zone_level, biome);
                 state.enemies.insert(enemy.id, enemy);
             }
         }
+    }
+}
+
+// ─── Pet / Companion System Handlers ─────────────────────────
+
+fn handle_pet_action(state: &Arc<AppState>, player_id: Uuid, payload: &serde_json::Value) {
+    let action = match payload.get("action").and_then(|v| v.as_str()) {
+        Some(a) => a.to_string(),
+        None => return,
+    };
+
+    match action.as_str() {
+        "summon" => {
+            let pet_id = match payload.get("petId").and_then(|v| v.as_str()) {
+                Some(id) => id.to_string(),
+                None => return,
+            };
+            if let Some(mut player) = state.players.get_mut(&player_id) {
+                if let Some(pet) = player.pet_collection.iter().find(|p| p.id == pet_id) {
+                    player.active_pet = Some(pet.clone());
+                } else {
+                    drop(player);
+                    let msg = json!({"type": MSG_CHAT_MESSAGE, "payload": {"sender":"System","text":"Pet not found in your collection.","channel":"system"}}).to_string();
+                    state.send_to(&player_id, &msg);
+                    return;
+                }
+            }
+            send_pet_update(state, &player_id);
+            send_stats_update_by_id(state, &player_id);
+        }
+        "dismiss" => {
+            if let Some(mut player) = state.players.get_mut(&player_id) {
+                player.active_pet = None;
+            }
+            send_pet_update(state, &player_id);
+            send_stats_update_by_id(state, &player_id);
+        }
+        "rename" => {
+            let pet_id = match payload.get("petId").and_then(|v| v.as_str()) {
+                Some(id) => id.to_string(),
+                None => return,
+            };
+            let new_name = match payload.get("name").and_then(|v| v.as_str()) {
+                Some(n) => {
+                    let trimmed = n.trim();
+                    if trimmed.is_empty() || trimmed.len() > 24 { return; }
+                    trimmed.to_string()
+                }
+                None => return,
+            };
+            if let Some(mut player) = state.players.get_mut(&player_id) {
+                if let Some(pet) = player.pet_collection.iter_mut().find(|p| p.id == pet_id) {
+                    pet.name = new_name.clone();
+                }
+                // Sync active pet if it matches
+                if let Some(ref mut active) = player.active_pet {
+                    if active.id == pet_id {
+                        active.name = new_name;
+                    }
+                }
+            }
+            send_pet_update(state, &player_id);
+        }
+        "feed" => {
+            let pet_id = match payload.get("petId").and_then(|v| v.as_str()) {
+                Some(id) => id.to_string(),
+                None => return,
+            };
+            let mut leveled_up = false;
+            if let Some(mut player) = state.players.get_mut(&player_id) {
+                if player.gold < 50 {
+                    drop(player);
+                    let msg = json!({"type": MSG_CHAT_MESSAGE, "payload": {"sender":"System","text":"Not enough gold! Feeding costs 50 gold.","channel":"system"}}).to_string();
+                    state.send_to(&player_id, &msg);
+                    return;
+                }
+                let pet_idx = player.pet_collection.iter().position(|p| p.id == pet_id);
+                match pet_idx {
+                    None => {
+                        drop(player);
+                        let msg = json!({"type": MSG_CHAT_MESSAGE, "payload": {"sender":"System","text":"Pet not found.","channel":"system"}}).to_string();
+                        state.send_to(&player_id, &msg);
+                        return;
+                    }
+                    Some(idx) => {
+                        if player.pet_collection[idx].level >= 20 {
+                            drop(player);
+                            let msg = json!({"type": MSG_CHAT_MESSAGE, "payload": {"sender":"System","text":"This pet is already max level!","channel":"system"}}).to_string();
+                            state.send_to(&player_id, &msg);
+                            return;
+                        }
+                        player.gold -= 50;
+                        player.pet_collection[idx].xp += 20;
+                        // Check level up: threshold is 100 * current_level
+                        while player.pet_collection[idx].xp >= player.pet_collection[idx].xp_to_next
+                            && player.pet_collection[idx].level < 20
+                        {
+                            let xp_to_next = player.pet_collection[idx].xp_to_next;
+                            player.pet_collection[idx].xp -= xp_to_next;
+                            player.pet_collection[idx].level += 1;
+                            player.pet_collection[idx].xp_to_next = 100 * player.pet_collection[idx].level as u64;
+                            // Increase bonus_value by per-level amount from catalog
+                            let pet_type = player.pet_collection[idx].pet_type.clone();
+                            if let Some(entry) = PET_CATALOG.iter().find(|(t, _, _, _, _, _)| *t == pet_type.as_str()) {
+                                player.pet_collection[idx].bonus_value += entry.4;
+                            }
+                            leveled_up = true;
+                        }
+                        // Sync active pet if it matches
+                        let updated_pet = player.pet_collection[idx].clone();
+                        if let Some(ref mut active) = player.active_pet {
+                            if active.id == pet_id {
+                                *active = updated_pet;
+                            }
+                        }
+                    }
+                }
+            }
+            send_pet_update(state, &player_id);
+            send_inventory_update(state, &player_id); // gold changed
+            if leveled_up {
+                send_stats_update_by_id(state, &player_id);
+                let msg = json!({"type": MSG_CHAT_MESSAGE, "payload": {"sender":"System","text":"Your pet leveled up! 🎉","channel":"system"}}).to_string();
+                state.send_to(&player_id, &msg);
+            }
+        }
+        "hatch" => {
+            let item_id = match payload.get("itemId").and_then(|v| v.as_str()) {
+                Some(id) => id.to_string(),
+                None => return,
+            };
+            let mut new_pet: Option<PetData> = None;
+            if let Some(mut player) = state.players.get_mut(&player_id) {
+                // Find the pet egg in inventory
+                let mut egg_slot = None;
+                for (i, slot) in player.inventory.iter().enumerate() {
+                    if let Some(item) = slot {
+                        if item.id == item_id && item.template_id.starts_with("pet_egg_") {
+                            egg_slot = Some(i);
+                            break;
+                        }
+                    }
+                }
+                let slot_idx = match egg_slot {
+                    Some(i) => i,
+                    None => {
+                        drop(player);
+                        let msg = json!({"type": MSG_CHAT_MESSAGE, "payload": {"sender":"System","text":"Pet egg not found in inventory.","channel":"system"}}).to_string();
+                        state.send_to(&player_id, &msg);
+                        return;
+                    }
+                };
+                // Extract pet_type from template_id
+                let pet_type = {
+                    let item = player.inventory[slot_idx].as_ref().unwrap();
+                    item.template_id.strip_prefix("pet_egg_").unwrap_or("wolf").to_string()
+                };
+                // Remove the egg (handle quantity/stacks)
+                {
+                    let item = player.inventory[slot_idx].as_mut().unwrap();
+                    if item.quantity > 1 {
+                        item.quantity -= 1;
+                    } else {
+                        player.inventory[slot_idx] = None;
+                    }
+                }
+                // Look up catalog entry
+                if let Some(&(_, name, icon, bonus_stat, bonus_per_level, rarity)) =
+                    PET_CATALOG.iter().find(|(t, _, _, _, _, _)| *t == pet_type)
+                {
+                    let pet = PetData {
+                        id: Uuid::new_v4().to_string(),
+                        name: name.to_string(),
+                        pet_type: pet_type.clone(),
+                        icon: icon.to_string(),
+                        level: 1,
+                        xp: 0,
+                        xp_to_next: 100,
+                        bonus_stat: bonus_stat.to_string(),
+                        bonus_value: bonus_per_level,
+                        rarity,
+                    };
+                    new_pet = Some(pet.clone());
+                    player.pet_collection.push(pet);
+                }
+            }
+            if let Some(pet) = &new_pet {
+                let msg = json!({"type": MSG_CHAT_MESSAGE, "payload": {
+                    "sender": "System",
+                    "text": format!("{} A {} hatched from the egg! Welcome, {}!", pet.icon, pet.pet_type, pet.name),
+                    "channel": "system"
+                }}).to_string();
+                state.send_to(&player_id, &msg);
+            }
+            send_pet_update(state, &player_id);
+            send_inventory_update(state, &player_id);
+        }
+        _ => {
+            let msg = json!({"type": MSG_CHAT_MESSAGE, "payload": {"sender":"System","text":"Unknown pet action.","channel":"system"}}).to_string();
+            state.send_to(&player_id, &msg);
+        }
+    }
+}
+
+fn send_pet_update(state: &Arc<AppState>, player_id: &Uuid) {
+    if let Some(player) = state.players.get(player_id) {
+        let active_payload = player.active_pet.as_ref().map(|p| p.to_payload());
+        let collection_payload: Vec<serde_json::Value> = player.pet_collection.iter()
+            .map(|p| p.to_payload())
+            .collect();
+        let msg = json!({
+            "type": MSG_PET_UPDATE,
+            "payload": {
+                "activePet": active_payload,
+                "petCollection": collection_payload,
+            }
+        }).to_string();
+        drop(player);
+        state.send_to(player_id, &msg);
+    }
+}
+
+// ─── Mount System ────────────────────────────────────────────
+
+fn handle_mount_action(state: &Arc<AppState>, player_id: Uuid, payload: &serde_json::Value) {
+    let action = payload.get("action").and_then(|v| v.as_str()).unwrap_or("");
+
+    match action {
+        "mount" => {
+            let mut player = match state.players.get_mut(&player_id) { Some(p) => p, None => return };
+            if player.mounted { return; } // Already mounted
+            if player.dead { return; }
+
+            // Find mount item in inventory
+            for mount_data in crate::protocol::MOUNT_DATA {
+                let (item_name, mount_name, speed_bonus, _emoji) = *mount_data;
+                if let Some(slot_idx) = player.inventory.iter().position(|s| {
+                    s.as_ref().map_or(false, |i| i.name == item_name)
+                }) {
+                    player.mounted = true;
+                    player.mount_speed_bonus = speed_bonus;
+                    player.mount_name = mount_name.to_string();
+                    // Don't consume the item — it's reusable
+
+                    let msg = json!({
+                        "type": crate::protocol::MSG_MOUNT_UPDATE,
+                        "payload": {
+                            "mounted": true,
+                            "mountName": mount_name,
+                            "speedBonus": speed_bonus,
+                        }
+                    }).to_string();
+                    let pid = player_id;
+                    drop(player);
+                    state.send_to(&pid, &msg);
+
+                    // Broadcast to nearby — they see mounted sprite
+                    let chat = json!({
+                        "type": crate::protocol::MSG_CHAT_MESSAGE,
+                        "payload": { "channel": "system", "message": format!("You mounted your {}!", mount_name) }
+                    }).to_string();
+                    state.send_to(&pid, &chat);
+                    return;
+                }
+            }
+
+            // No mount item found
+            let msg = json!({
+                "type": crate::protocol::MSG_CHAT_MESSAGE,
+                "payload": { "channel": "system", "message": "You don't have any mount items!" }
+            }).to_string();
+            drop(player);
+            state.send_to(&player_id, &msg);
+        }
+        "dismount" => {
+            let mut player = match state.players.get_mut(&player_id) { Some(p) => p, None => return };
+            if !player.mounted { return; }
+            player.mounted = false;
+            player.mount_speed_bonus = 0.0;
+            let old_name = std::mem::take(&mut player.mount_name);
+            drop(player);
+
+            let msg = json!({
+                "type": crate::protocol::MSG_MOUNT_UPDATE,
+                "payload": { "mounted": false, "mountName": "", "speedBonus": 0.0 }
+            }).to_string();
+            state.send_to(&player_id, &msg);
+
+            let chat = json!({
+                "type": crate::protocol::MSG_CHAT_MESSAGE,
+                "payload": { "channel": "system", "message": format!("You dismounted your {}.", old_name) }
+            }).to_string();
+            state.send_to(&player_id, &chat);
+        }
+        _ => {}
+    }
+}
+
+// Auto-dismount when entering combat
+fn auto_dismount_on_combat(state: &Arc<AppState>, player_id: &Uuid) {
+    if let Some(mut player) = state.players.get_mut(player_id) {
+        if player.mounted {
+            player.mounted = false;
+            player.mount_speed_bonus = 0.0;
+            player.mount_name.clear();
+            drop(player);
+
+            let msg = json!({
+                "type": crate::protocol::MSG_MOUNT_UPDATE,
+                "payload": { "mounted": false, "mountName": "", "speedBonus": 0.0 }
+            }).to_string();
+            state.send_to(player_id, &msg);
+
+            let chat = json!({
+                "type": crate::protocol::MSG_CHAT_MESSAGE,
+                "payload": { "channel": "system", "message": "You were dismounted by entering combat!" }
+            }).to_string();
+            state.send_to(player_id, &chat);
+        }
+    }
+}
+
+// ─── Mail System ─────────────────────────────────────────────
+
+fn handle_mail_action(state: &Arc<AppState>, player_id: Uuid, payload: &serde_json::Value) {
+    let action = payload.get("action").and_then(|v| v.as_str()).unwrap_or("");
+
+    match action {
+        "send" => {
+            let to_name = payload.get("to").and_then(|v| v.as_str()).unwrap_or("");
+            let subject = payload.get("subject").and_then(|v| v.as_str()).unwrap_or("No Subject");
+            let body = payload.get("body").and_then(|v| v.as_str()).unwrap_or("");
+            let gold = payload.get("gold").and_then(|v| v.as_u64()).unwrap_or(0);
+            let item_slot = payload.get("itemSlot").and_then(|v| v.as_u64());
+
+            if to_name.is_empty() || body.is_empty() {
+                let msg = json!({ "type": crate::protocol::MSG_CHAT_MESSAGE, "payload": { "channel": "system", "message": "Invalid mail parameters" } }).to_string();
+                state.send_to(&player_id, &msg);
+                return;
+            }
+
+            // Find recipient
+            let recipient_id = state.players.iter().find(|e| e.value().username == to_name).map(|e| *e.key());
+            let recipient_id = match recipient_id {
+                Some(id) => id,
+                None => {
+                    let msg = json!({ "type": crate::protocol::MSG_CHAT_MESSAGE, "payload": { "channel": "system", "message": format!("Player '{}' not found", to_name) } }).to_string();
+                    state.send_to(&player_id, &msg);
+                    return;
+                }
+            };
+
+            // Deduct gold from sender
+            let mut item_to_send: Option<crate::protocol::Item> = None;
+            let sender_name;
+            {
+                let mut sender = match state.players.get_mut(&player_id) { Some(p) => p, None => return };
+                if sender.gold < gold {
+                    drop(sender);
+                    let msg = json!({ "type": crate::protocol::MSG_CHAT_MESSAGE, "payload": { "channel": "system", "message": "Not enough gold" } }).to_string();
+                    state.send_to(&player_id, &msg);
+                    return;
+                }
+                sender.gold -= gold;
+                sender_name = sender.username.clone();
+
+                // Remove item from sender inventory if specified
+                if let Some(slot) = item_slot {
+                    let idx = slot as usize;
+                    if idx < sender.inventory.len() {
+                        item_to_send = sender.inventory[idx].take();
+                    }
+                }
+            }
+
+            // Add to recipient mailbox
+            let mail = crate::protocol::MailMessage {
+                id: Uuid::new_v4().to_string(),
+                from: sender_name.clone(),
+                subject: subject[..subject.len().min(50)].to_string(),
+                body: body[..body.len().min(500)].to_string(),
+                gold,
+                item: item_to_send,
+                read: false,
+                tick: 0,
+            };
+
+            if let Some(mut recipient) = state.players.get_mut(&recipient_id) {
+                recipient.mailbox.push(mail);
+            }
+
+            // Notify sender
+            let msg = json!({ "type": crate::protocol::MSG_CHAT_MESSAGE, "payload": { "channel": "system", "message": format!("Mail sent to {}!", to_name) } }).to_string();
+            state.send_to(&player_id, &msg);
+
+            // Notify recipient
+            let msg = json!({ "type": crate::protocol::MSG_CHAT_MESSAGE, "payload": { "channel": "system", "message": format!("📬 You have new mail from {}!", sender_name) } }).to_string();
+            state.send_to(&recipient_id, &msg);
+            send_mail_data(state, &recipient_id);
+
+            // Update sender inventory
+            send_inventory_update(state, &player_id);
+        }
+        "read" => {
+            let mail_id = payload.get("mailId").and_then(|v| v.as_str()).unwrap_or("");
+            if let Some(mut player) = state.players.get_mut(&player_id) {
+                if let Some(mail) = player.mailbox.iter_mut().find(|m| m.id == mail_id) {
+                    mail.read = true;
+                }
+            }
+            send_mail_data(state, &player_id);
+        }
+        "claim" => {
+            let mail_id = payload.get("mailId").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let mut claimed_gold = 0u64;
+            let mut claimed_item: Option<crate::protocol::Item> = None;
+
+            if let Some(mut player) = state.players.get_mut(&player_id) {
+                if let Some(mail) = player.mailbox.iter_mut().find(|m| m.id == mail_id) {
+                    claimed_gold = mail.gold;
+                    claimed_item = mail.item.take();
+                    mail.gold = 0;
+                    mail.read = true;
+                }
+
+                // Add gold
+                player.gold += claimed_gold;
+
+                // Add item to inventory
+                if let Some(item) = claimed_item {
+                    if let Some(empty) = player.inventory.iter_mut().find(|s| s.is_none()) {
+                        *empty = Some(item);
+                    }
+                }
+            }
+            send_mail_data(state, &player_id);
+            send_inventory_update(state, &player_id);
+        }
+        "delete" => {
+            let mail_id = payload.get("mailId").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if let Some(mut player) = state.players.get_mut(&player_id) {
+                player.mailbox.retain(|m| m.id != mail_id);
+            }
+            send_mail_data(state, &player_id);
+        }
+        "list" => {
+            send_mail_data(state, &player_id);
+        }
+        _ => {}
+    }
+}
+
+fn send_mail_data(state: &Arc<AppState>, player_id: &Uuid) {
+    let player = match state.players.get(player_id) { Some(p) => p, None => return };
+    let mails: Vec<serde_json::Value> = player.mailbox.iter().map(|m| {
+        json!({
+            "id": m.id,
+            "from": m.from,
+            "subject": m.subject,
+            "body": m.body,
+            "gold": m.gold,
+            "item": m.item.as_ref().map(|i| i.to_payload()),
+            "read": m.read,
+            "hasAttachment": m.gold > 0 || m.item.is_some(),
+        })
+    }).collect();
+    let msg = json!({ "type": crate::protocol::MSG_MAIL_DATA, "payload": { "mails": mails } }).to_string();
+    drop(player);
+    state.send_to(player_id, &msg);
+}
+
+// ─── Arena PvP System ────────────────────────────────────────
+
+fn handle_arena_action(state: &Arc<AppState>, player_id: Uuid, payload: &serde_json::Value) {
+    let action = payload.get("action").and_then(|v| v.as_str()).unwrap_or("");
+
+    match action {
+        "queue" => {
+            if let Some(mut player) = state.players.get_mut(&player_id) {
+                if player.dead { return; }
+                player.arena_queue = true;
+                drop(player);
+
+                let msg = json!({ "type": crate::protocol::MSG_CHAT_MESSAGE, "payload": { "channel": "system", "message": "⚔️ You joined the arena queue! Waiting for opponent..." } }).to_string();
+                state.send_to(&player_id, &msg);
+
+                let update = json!({ "type": crate::protocol::MSG_ARENA_UPDATE, "payload": { "action": "queued" } }).to_string();
+                state.send_to(&player_id, &update);
+            }
+        }
+        "leave" => {
+            if let Some(mut player) = state.players.get_mut(&player_id) {
+                player.arena_queue = false;
+                drop(player);
+
+                let msg = json!({ "type": crate::protocol::MSG_CHAT_MESSAGE, "payload": { "channel": "system", "message": "You left the arena queue." } }).to_string();
+                state.send_to(&player_id, &msg);
+
+                let update = json!({ "type": crate::protocol::MSG_ARENA_UPDATE, "payload": { "action": "left_queue" } }).to_string();
+                state.send_to(&player_id, &update);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn process_arena_matchmaking(state: &Arc<AppState>) {
+    // Collect queued players sorted by rating
+    let mut queued: Vec<(Uuid, i32)> = Vec::new();
+    for entry in state.players.iter() {
+        if entry.arena_queue && !entry.dead {
+            queued.push((*entry.key(), entry.arena_rating));
+        }
+    }
+    queued.sort_by_key(|(_, r)| *r);
+
+    // Match pairs with closest ratings
+    let mut matched = std::collections::HashSet::new();
+    for i in 0..queued.len() {
+        if matched.contains(&i) { continue; }
+        for j in (i + 1)..queued.len() {
+            if matched.contains(&j) { continue; }
+            let rating_diff = (queued[i].1 - queued[j].1).abs();
+            if rating_diff <= 300 {
+                matched.insert(i);
+                matched.insert(j);
+                start_arena_match(state, queued[i].0, queued[j].0);
+                break;
+            }
+        }
+    }
+}
+
+fn start_arena_match(state: &Arc<AppState>, p1: Uuid, p2: Uuid) {
+    // Remove from queue, heal both to full, teleport to arena zone
+    let (p1_name, p2_name);
+    {
+        let mut player1 = match state.players.get_mut(&p1) { Some(p) => p, None => return };
+        player1.arena_queue = false;
+        player1.hp = player1.max_hp + player1.party_bonus_hp;
+        player1.mp = player1.max_mp;
+        // Teleport to arena: north arena
+        player1.x = 150.0;
+        player1.y = 150.0;
+        player1.target_x = 150.0;
+        player1.target_y = 150.0;
+        p1_name = player1.username.clone();
+    }
+    {
+        let mut player2 = match state.players.get_mut(&p2) { Some(p) => p, None => return };
+        player2.arena_queue = false;
+        player2.hp = player2.max_hp + player2.party_bonus_hp;
+        player2.mp = player2.max_mp;
+        // Teleport to arena: south arena
+        player2.x = 155.0;
+        player2.y = 155.0;
+        player2.target_x = 155.0;
+        player2.target_y = 155.0;
+        p2_name = player2.username.clone();
+    }
+
+    // Notify both players
+    let msg1 = json!({
+        "type": crate::protocol::MSG_ARENA_UPDATE,
+        "payload": { "action": "match_start", "opponent": p2_name, "opponentId": p2.to_string() }
+    }).to_string();
+    state.send_to(&p1, &msg1);
+
+    let msg2 = json!({
+        "type": crate::protocol::MSG_ARENA_UPDATE,
+        "payload": { "action": "match_start", "opponent": p1_name, "opponentId": p1.to_string() }
+    }).to_string();
+    state.send_to(&p2, &msg2);
+
+    let chat1 = json!({ "type": crate::protocol::MSG_CHAT_MESSAGE, "payload": { "channel": "system", "message": format!("⚔️ Arena match started! Your opponent: {}", p2_name) } }).to_string();
+    state.send_to(&p1, &chat1);
+
+    let chat2 = json!({ "type": crate::protocol::MSG_CHAT_MESSAGE, "payload": { "channel": "system", "message": format!("⚔️ Arena match started! Your opponent: {}", p1_name) } }).to_string();
+    state.send_to(&p2, &chat2);
+}
+
+// ─── Daily Quest System ──────────────────────────────────────
+
+fn generate_daily_quests(player: &mut crate::protocol::PlayerData) {
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    let template_count = crate::protocol::DAILY_QUEST_TEMPLATES.len();
+
+    // Pick 3 random non-duplicate daily quests
+    let mut indices: Vec<usize> = Vec::new();
+    while indices.len() < 3 {
+        let idx = rng.gen_range(0..template_count);
+        if !indices.contains(&idx) {
+            indices.push(idx);
+        }
+    }
+
+    player.daily_quests = indices.iter().map(|&idx| crate::protocol::DailyQuest::from_template(idx)).collect();
+}
+
+fn check_daily_reset(state: &Arc<AppState>, tick: u64) {
+    // Reset dailies every 36000 ticks (~30 min for testing, would be 24h in prod)
+    let daily_cycle = 36000u64;
+
+    for mut entry in state.players.iter_mut() {
+        let player = entry.value_mut();
+        if player.daily_quests.is_empty() || tick >= player.daily_reset_tick {
+            generate_daily_quests(player);
+            player.daily_reset_tick = tick + daily_cycle;
+        }
+    }
+}
+
+fn handle_daily_quest_claim(state: &Arc<AppState>, player_id: Uuid, payload: &serde_json::Value) {
+    let quest_id = payload.get("questId").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+    let (reward_xp, reward_gold, found);
+    {
+        let mut player = match state.players.get_mut(&player_id) { Some(p) => p, None => return };
+        if let Some(dq) = player.daily_quests.iter_mut().find(|q| q.quest_id == quest_id) {
+            if dq.completed || dq.progress < dq.target {
+                found = false;
+                reward_xp = 0;
+                reward_gold = 0;
+            } else {
+                dq.completed = true;
+                reward_xp = dq.reward_xp;
+                reward_gold = dq.reward_gold;
+                found = true;
+                player.xp += reward_xp;
+                player.gold += reward_gold;
+            }
+        } else {
+            found = false;
+            reward_xp = 0;
+            reward_gold = 0;
+        }
+    }
+
+    if found {
+        let msg = json!({ "type": crate::protocol::MSG_CHAT_MESSAGE, "payload": { "channel": "system", "message": format!("🎯 Daily quest complete! +{} XP, +{} Gold", reward_xp, reward_gold) } }).to_string();
+        state.send_to(&player_id, &msg);
+    }
+    send_daily_quest_data(state, &player_id);
+}
+
+fn update_daily_quest_progress(state: &Arc<AppState>, player_id: &Uuid, objective: &str, amount: u32) {
+    if let Some(mut player) = state.players.get_mut(player_id) {
+        let mut any_updated = false;
+        for dq in player.daily_quests.iter_mut() {
+            if !dq.completed && dq.objective == objective {
+                dq.progress = (dq.progress + amount).min(dq.target);
+                any_updated = true;
+            }
+        }
+        if any_updated {
+            // Must drop before sending
+            let pid = *player_id;
+            drop(player);
+            send_daily_quest_data(state, &pid);
+        }
+    }
+}
+
+fn send_daily_quest_data(state: &Arc<AppState>, player_id: &Uuid) {
+    let player = match state.players.get(player_id) { Some(p) => p, None => return };
+    let quests: Vec<serde_json::Value> = player.daily_quests.iter().map(|dq| {
+        json!({
+            "questId": dq.quest_id,
+            "title": dq.title,
+            "description": dq.description,
+            "objective": dq.objective,
+            "target": dq.target,
+            "progress": dq.progress,
+            "completed": dq.completed,
+            "rewardXp": dq.reward_xp,
+            "rewardGold": dq.reward_gold,
+        })
+    }).collect();
+    let msg = json!({ "type": crate::protocol::MSG_DAILY_QUEST_DATA, "payload": { "dailyQuests": quests } }).to_string();
+    drop(player);
+    state.send_to(player_id, &msg);
+}
+
+// ─── Treasure Chest Spawning ─────────────────────────────────
+fn spawn_treasure_chests(state: &Arc<AppState>, tick: u64) {
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    
+    let player_positions: Vec<(f64, f64, u32)> = state.players.iter()
+        .filter(|p| !p.dead)
+        .map(|p| (p.x, p.y, p.level))
+        .collect();
+    
+    if player_positions.is_empty() { return; }
+    
+    let chest_count = rng.gen_range(1..=3usize.min(player_positions.len()));
+    for _ in 0..chest_count {
+        let (px, py, plevel) = player_positions[rng.gen_range(0..player_positions.len())];
+        let cx = px + rng.gen_range(-15.0..15.0);
+        let cy = py + rng.gen_range(-15.0..15.0);
+        let zone_level = plevel.max(1);
+        
+        let mut loot = crate::protocol::generate_loot(zone_level, zone_level, 0);
+        let gold_amount = rng.gen_range(50..200) * zone_level as u64;
+        loot.push(crate::protocol::Item::new_material(&format!("Gold Pouch ({}g)", gold_amount), 1, 1));
+        
+        if zone_level >= 15 && rng.gen_bool(0.15) {
+            let legendaries = crate::protocol::LEGENDARY_UNIQUES;
+            let eligible: Vec<_> = legendaries.iter()
+                .filter(|(_, _, _, _, _, min_lv, _)| zone_level >= *min_lv)
+                .collect();
+            if !eligible.is_empty() {
+                let leg = eligible[rng.gen_range(0..eligible.len())];
+                // (name, slot, stat_key, stat_val, rarity, min_level, description)
+                let item = if leg.1 == "weapon" {
+                    let mut i = crate::protocol::Item::new_weapon(leg.0, leg.4, zone_level, leg.3);
+                    i.description = leg.6.to_string();
+                    i
+                } else {
+                    let mut i = crate::protocol::Item::new_armor(leg.0, leg.1, leg.4, zone_level, leg.3);
+                    i.description = leg.6.to_string();
+                    i
+                };
+                loot.push(item);
+            }
+        }
+        
+        for item in loot {
+            let ground_item = crate::protocol::GroundItem {
+                id: uuid::Uuid::new_v4(),
+                item,
+                x: cx + rng.gen_range(-0.5..0.5),
+                y: cy + rng.gen_range(-0.5..0.5),
+                owner_id: None,
+                drop_time: tick as f64,
+                protection_duration: 0.0,
+            };
+            state.ground_items.insert(ground_item.id, ground_item);
+        }
+        
+        let announce = json!({
+            "type": crate::protocol::MSG_CHAT_MESSAGE,
+            "payload": {
+                "sender": "🏴‍☠️ Treasure",
+                "text": format!("A treasure chest has appeared nearby! ({:.0}, {:.0})", cx, cy),
+                "channel": "system",
+            }
+        }).to_string();
+        state.send_to_all_near(cx, cy, 25.0, &announce);
+    }
+}
+
+// ─── Bounty Action Handler ──────────────────────────────────────
+fn handle_bounty_action(state: &Arc<AppState>, player_id: uuid::Uuid, payload: &serde_json::Value) {
+    use crate::protocol::*;
+    let action = payload.get("action").and_then(|v| v.as_str()).unwrap_or("");
+
+    match action {
+        "place" => {
+            let target_name = payload.get("targetName").and_then(|v| v.as_str()).unwrap_or("");
+            let amount = payload.get("amount").and_then(|v| v.as_u64()).unwrap_or(0);
+            if target_name.is_empty() || amount < 1000 { return; }
+
+            // Find target by name — collect ID only
+            let target_id = state.players.iter()
+                .find(|r| r.value().username.eq_ignore_ascii_case(target_name))
+                .map(|r| *r.key());
+
+            let target_id = match target_id {
+                Some(id) if id != player_id => id,
+                _ => {
+                    let err = serde_json::json!({
+                        "type": MSG_RUNE_RESULT,
+                        "payload": { "success": false, "error": "Player not found" }
+                    }).to_string();
+                    state.send_to(&player_id, &err);
+                    return;
+                }
+            };
+
+            // Deduct gold from placer
+            let deducted = {
+                if let Some(mut p) = state.players.get_mut(&player_id) {
+                    if p.gold >= amount {
+                        p.gold -= amount;
+                        true
+                    } else { false }
+                } else { false }
+            };
+            if !deducted { return; }
+
+            // Credit bounty to target — if target gone, refund
+            let credited = {
+                if let Some(mut t) = state.players.get_mut(&target_id) {
+                    t.bounty_gold += amount;
+                    true
+                } else { false }
+            };
+            if !credited {
+                // Refund placer
+                if let Some(mut p) = state.players.get_mut(&player_id) {
+                    p.gold += amount;
+                }
+                return;
+            }
+
+            send_inventory_update(state, &player_id);
+
+            // Broadcast bounty placement
+            let placer_name = state.players.get(&player_id).map(|p| p.username.clone()).unwrap_or_default();
+            let msg = serde_json::json!({
+                "type": MSG_CHAT_MESSAGE,
+                "payload": {
+                    "sender": "Bounty",
+                    "text": format!("💀 {} placed a {}g bounty on {}!", placer_name, amount, target_name),
+                    "channel": "system"
+                }
+            }).to_string();
+            state.broadcast(&msg);
+
+            // Send updated bounty list to requester
+            send_bounty_list(state, &player_id);
+        }
+        "list" => {
+            send_bounty_list(state, &player_id);
+        }
+        _ => {}
+    }
+}
+
+fn send_bounty_list(state: &Arc<AppState>, player_id: &uuid::Uuid) {
+    use crate::protocol::*;
+    let mut bounties: Vec<serde_json::Value> = Vec::new();
+    for r in state.players.iter() {
+        let p = r.value();
+        if p.bounty_gold > 0 {
+            bounties.push(serde_json::json!({
+                "name": p.username,
+                "bounty": p.bounty_gold,
+                "level": p.level,
+            }));
+        }
+    }
+    bounties.sort_by(|a, b| b["bounty"].as_u64().cmp(&a["bounty"].as_u64()));
+
+    let my_bounty = state.players.get(player_id).map(|p| p.bounty_gold).unwrap_or(0);
+
+    let msg = serde_json::json!({
+        "type": MSG_BOUNTY_UPDATE,
+        "payload": {
+            "bounties": bounties,
+            "myBounty": my_bounty,
+        }
+    }).to_string();
+    state.send_to(player_id, &msg);
+}
+
+// ─── Rune Craft Handler ──────────────────────────────────────
+fn handle_rune_craft(state: &Arc<AppState>, player_id: uuid::Uuid, payload: &serde_json::Value) {
+    use crate::protocol::*;
+    let rune_name = payload.get("rune_name").and_then(|v| v.as_str()).unwrap_or("");
+
+    // Look up recipe
+    let recipe = RUNE_RECIPES.iter().find(|r| r.0 == rune_name);
+    let (_, _mat_id, min_magic, mana_cost) = match recipe {
+        Some(r) => *r,
+        None => {
+            let msg = serde_json::json!({
+                "type": MSG_RUNE_RESULT,
+                "payload": { "success": false, "error": "Unknown rune recipe" }
+            }).to_string();
+            state.send_to(&player_id, &msg);
+            return;
+        }
+    };
+
+    // Validate + mutate in one get_mut block (avoid stale-read race)
+    let crafted = {
+        if let Some(mut p) = state.players.get_mut(&player_id) {
+            // Check magic level (max_mp)
+            if (p.max_mp as u32) < min_magic {
+                Some(Err("Your magic level is too low"))
+            } else if (p.mp as u32) < mana_cost {
+                Some(Err("Not enough mana"))
+            } else {
+                // Find blank rune by template_id, decrement stack
+                let rune_slot = p.inventory.iter().position(|s| {
+                    s.as_ref().map_or(false, |item| item.template_id == "blank_rune")
+                });
+                match rune_slot {
+                    Some(idx) => {
+                        // Decrement quantity, remove slot only if 0
+                        let should_clear = {
+                            let item = p.inventory[idx].as_mut().unwrap();
+                            if item.quantity > 1 {
+                                item.quantity -= 1;
+                                false
+                            } else {
+                                true
+                            }
+                        };
+                        if should_clear { p.inventory[idx] = None; }
+
+                        // Consume mana
+                        p.mp -= mana_cost as i32;
+
+                        // Add crafted rune as consumable
+                        let rune = Item::new_consumable(rune_name, 2, 1); // rarity 2 = uncommon
+                        p.add_item(rune);
+
+                        Some(Ok(()))
+                    }
+                    None => Some(Err("No Blank Rune in inventory"))
+                }
+            }
+        } else { None }
+    };
+
+    // Send results (guard dropped)
+    match crafted {
+        Some(Ok(())) => {
+            let msg = serde_json::json!({
+                "type": MSG_RUNE_RESULT,
+                "payload": { "success": true, "rune_name": rune_name }
+            }).to_string();
+            state.send_to(&player_id, &msg);
+            send_inventory_update(state, &player_id);
+            send_stats_update_by_id(state, &player_id);
+        }
+        Some(Err(err)) => {
+            let msg = serde_json::json!({
+                "type": MSG_RUNE_RESULT,
+                "payload": { "success": false, "error": err }
+            }).to_string();
+            state.send_to(&player_id, &msg);
+        }
+        None => {}
     }
 }

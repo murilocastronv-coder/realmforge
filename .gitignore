@@ -1,22 +1,47 @@
-# Build
+# ── Build artifacts ──
 /server/target/
 /client/dist/
 /client/node_modules/
 
-# IDE
+# ── IDE / Editor ──
 .idea/
 .vscode/
 *.swp
 *.swo
 *~
+*.sublime-project
+*.sublime-workspace
 
-# OS
+# ── OS files ──
 .DS_Store
 Thumbs.db
+Desktop.ini
+ehthumbs.db
 
-# Env
+# ── Environment / Secrets ──
 .env
-.env.local
+.env.*
+!.env.example
 
-# Logs
+# ── Logs ──
 *.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ── Runtime / Cache ──
+*.pid
+*.seed
+*.pid.lock
+.cache/
+.parcel-cache/
+.turbo/
+
+# ── Test / Coverage ──
+coverage/
+*.lcov
+.nyc_output/
+
+# ── Misc ──
+*.tgz
+*.tar.gz

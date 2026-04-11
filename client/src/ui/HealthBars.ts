@@ -1,4 +1,5 @@
 import Phaser from 'phaser';
+import { ISOMETRIC_THEME, getHealthFillColor } from '../theme/isometricTheme';
 
 /**
  * HealthBars — renders floating HP bars above entities.
@@ -22,13 +23,13 @@ export class HealthBars {
       bar.bg.setPosition(x, y);
       bar.fill.setPosition(x - barW / 2, y);
       bar.fill.width = barW * ratio;
-      bar.fill.fillColor = ratio > 0.5 ? 0x00cc00 : ratio > 0.25 ? 0xcccc00 : 0xcc0000;
+      bar.fill.fillColor = getHealthFillColor(ratio);
       bar.bg.setDepth(depth + 1);
       bar.fill.setDepth(depth + 2);
     } else {
-      const bg = this.scene.add.rectangle(x, y, barW + 2, barH + 2, 0x000000, 0.7);
+      const bg = this.scene.add.rectangle(x, y, barW + 2, barH + 2, ISOMETRIC_THEME.ui.bars.healthBackdrop, 0.7);
       bg.setDepth(depth + 1);
-      const fill = this.scene.add.rectangle(x - barW / 2, y, barW * ratio, barH, 0x00cc00);
+      const fill = this.scene.add.rectangle(x - barW / 2, y, barW * ratio, barH, getHealthFillColor(ratio));
       fill.setOrigin(0, 0.5);
       fill.setDepth(depth + 2);
       this.bars.set(entityId, { bg, fill });

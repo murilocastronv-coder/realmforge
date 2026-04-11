@@ -4,6 +4,33 @@ use crate::protocol::ChunkData;
 
 pub const CHUNK_SIZE: usize = 32;
 
+/// Town definitions: (center_x, center_y, radius, name)
+pub const TOWNS: &[(f64, f64, f64, &str)] = &[
+    (0.0,    0.0,    15.0, "Starfall Haven"),      // Starting town (center)
+    (80.0,   80.0,   10.0, "Ironforge Outpost"),    // NE — near mountains
+    (-85.0,  70.0,   10.0, "Frostwind Village"),     // NW — near tundra/crypt
+    (-75.0,  -80.0,  10.0, "Shadowmere"),            // SW — near shadow dungeon
+    (90.0,   -75.0,  10.0, "Dusthaven"),             // SE — near desert/mines
+    (0.0,    120.0,  8.0,  "Northwatch Keep"),       // Far north
+    (0.0,    -130.0, 8.0,  "Voidgate Citadel"),      // Far south — near void rift
+    (130.0,  0.0,    8.0,  "Sunspire"),              // Far east
+    (-130.0, 0.0,    8.0,  "Grimhollow"),            // Far west
+    // Outposts for better world coverage
+    (50.0,   -50.0,  7.0,  "Riverside Camp"),        // Mid-SE
+    (-50.0,  50.0,   7.0,  "Wildwood Hamlet"),       // Mid-NW
+    (110.0,  -90.0,  7.0,  "Abyssal Outpost"),       // Near Abyssal Depths
+    (-110.0, 70.0,   7.0,  "Temple Landing"),         // Near Sunken Temple
+    (60.0,   110.0,  7.0,  "Eagle's Perch"),          // NE outskirts
+    // Frontier settlements
+    (-40.0, -130.0,  6.0,  "Demonwatch Garrison"),   // Near Demon's Throne
+    (130.0,  100.0,  6.0,  "Skyreach Monastery"),    // Near Sky Citadel  
+    (140.0, -50.0,   6.0,  "Ashfall Settlement"),    // East volcanic region
+    (-140.0, -70.0,  6.0,  "Twilight Refuge"),       // Far SW wilderness
+];
+
+/// Buffer around towns where enemies don't spawn (safe zone extends beyond town tiles)
+const TOWN_SAFE_BUFFER: f64 = 15.0;
+
 pub struct WorldGenerator {
     elevation_noise: Perlin,
     moisture_noise: Perlin,
@@ -68,11 +95,86 @@ impl WorldGenerator {
         }
     }
 
+    /// Check if a position is within any town radius
+    pub fn is_in_town(&self, wx: f64, wy: f64) -> bool {
+        for &(tx, ty, radius, _) in TOWNS {
+            let dx = wx - tx;
+            let dy = wy - ty;
+            if (dx * dx + dy * dy).sqrt() < radius {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Get town info if position is inside a town
+    pub fn get_town_info(&self, wx: f64, wy: f64) -> Option<(&'static str, f64, f64)> {
+        for &(tx, ty, radius, name) in TOWNS {
+            let dx = wx - tx;
+            let dy = wy - ty;
+            if (dx * dx + dy * dy).sqrt() < radius {
+                return Some((name, tx, ty));
+            }
+        }
+        None
+    }
+
+    /// Check if position is in a safe zone (any town + buffer)
+    pub fn is_safe_zone(&self, wx: f64, wy: f64) -> bool {
+        for &(tx, ty, radius, _) in TOWNS {
+            let dx = wx - tx;
+            let dy = wy - ty;
+            if (dx * dx + dy * dy).sqrt() < radius + TOWN_SAFE_BUFFER {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Get the biome name at a world position
+    pub fn get_biome(&self, wx: f64, wy: f64) -> &'static str {
+        // Dungeon zones override biome for thematic enemies
+        if let Some((name, _)) = self.get_dungeon_info(wx, wy) {
+            return match name {
+                "Necropolis" => "undead",
+                "Volcanic Forge" | "Infernal Pit" => "volcanic",
+                "Abyssal Depths" | "Sunken Temple" => "deep_ocean",
+                "Frozen Crypt" | "Frostbite Cavern" => "tundra",
+                "Shadow Dungeon" | "Void Rift" => "undead",
+                "Sky Citadel" => "celestial",
+                "Ashfall Furnace" => "volcanic",
+                "Twilight Sanctum" => "undead",
+                "Celestial Spire" => "celestial",
+                "Demon's Throne" => "volcanic",
+                "Crystal Caverns" => "mountain",
+                _ => {
+                    // Fall through to normal biome
+                    match self.get_tile(wx, wy) {
+                        0 => "grassland", 1 => "ocean", 2 => "desert",
+                        3 => "mountain", 4 => "tundra", 5 => "forest",
+                        6 => "swamp", 7 => "town", _ => "grassland",
+                    }
+                }
+            };
+        }
+        match self.get_tile(wx, wy) {
+            0 => "grassland",
+            1 => "ocean",
+            2 => "desert",
+            3 => "mountain",
+            4 => "tundra",
+            5 => "forest",
+            6 => "swamp",
+            7 => "town",
+            _ => "grassland",
+        }
+    }
+
     fn get_tile(&self, wx: f64, wy: f64) -> u8 {
         let dist = (wx * wx + wy * wy).sqrt();
 
-        // Town area near center
-        if dist < 15.0 {
+        // Check all towns
+        if self.is_in_town(wx, wy) {
             return 7; // town
         }
 
@@ -125,13 +227,89 @@ impl WorldGenerator {
         0 // grass
     }
 
-    /// Get the zone level (difficulty) based on distance from center
+    /// Get the zone level (difficulty) based on distance from nearest town
     pub fn get_zone_level(&self, wx: f64, wy: f64) -> u32 {
+        let dungeon_boost = self.get_dungeon_boost(wx, wy);
+
+        // Safe zone around any town
+        if self.is_safe_zone(wx, wy) {
+            return 0;
+        }
+
+        // Distance from center determines base difficulty
         let dist = (wx * wx + wy * wy).sqrt();
-        // Zone 0 = safe (no enemies) within 30 tiles
-        if dist < 30.0 { return 0; }
         let zone_radius = 25.0;
-        ((dist - 30.0) / zone_radius).floor() as u32 + 1
+        let base = ((dist.max(30.0) - 30.0) / zone_radius).floor() as u32 + 1;
+        base + dungeon_boost
+    }
+
+    /// Returns bonus level if position is inside a dungeon zone
+    pub fn get_dungeon_boost(&self, wx: f64, wy: f64) -> u32 {
+        // Static dungeon zone definitions: (center_x, center_y, radius, level_boost)
+        const DUNGEONS: &[(f64, f64, f64, u32, &str)] = &[
+            (60.0,  60.0,  12.0, 5,  "Goblin Warren"),
+            (-65.0, 55.0,  10.0, 8,  "Frozen Crypt"),
+            (-55.0, -70.0, 14.0, 10, "Shadow Dungeon"),
+            (75.0,  -60.0, 11.0, 7,  "Stone Mines"),
+            (0.0,   -100.0, 15.0, 15, "Void Rift"),
+            (90.0,  30.0,  10.0, 12, "Dragon's Lair"),
+            (-90.0, -40.0, 11.0, 9,  "Necropolis"),
+            (40.0,  -85.0, 13.0, 11, "Infernal Pit"),
+            (-30.0, 90.0,  10.0, 6,  "Crystal Caverns"),
+            (100.0, -90.0, 14.0, 18, "Abyssal Depths"),
+            (-110.0, 70.0,  12.0, 13, "Sunken Temple"),
+            (120.0,  0.0,   11.0, 16, "Volcanic Forge"),
+            (0.0,    120.0, 13.0, 14, "Frostbite Cavern"),
+            (-40.0, -120.0, 12.0, 20, "Demon's Throne"),
+            (80.0,   100.0, 10.0, 17, "Sky Citadel"),
+            // New endgame dungeons
+            (140.0,  -50.0, 11.0, 22, "Ashfall Furnace"),
+            (-140.0, -70.0, 12.0, 19, "Twilight Sanctum"),
+            (130.0,  100.0, 13.0, 25, "Celestial Spire"),
+        ];
+
+        for &(cx, cy, radius, boost, _name) in DUNGEONS {
+            let dx = wx - cx;
+            let dy = wy - cy;
+            if (dx * dx + dy * dy).sqrt() <= radius {
+                return boost;
+            }
+        }
+        0
+    }
+
+    /// Check if a position is in a dungeon zone, returns (name, bonus_level) if so
+    pub fn get_dungeon_info(&self, wx: f64, wy: f64) -> Option<(&'static str, u32)> {
+        const DUNGEONS: &[(f64, f64, f64, u32, &str)] = &[
+            (60.0,  60.0,  12.0, 5,  "Goblin Warren"),
+            (-65.0, 55.0,  10.0, 8,  "Frozen Crypt"),
+            (-55.0, -70.0, 14.0, 10, "Shadow Dungeon"),
+            (75.0,  -60.0, 11.0, 7,  "Stone Mines"),
+            (0.0,   -100.0, 15.0, 15, "Void Rift"),
+            (90.0,  30.0,  10.0, 12, "Dragon's Lair"),
+            (-90.0, -40.0, 11.0, 9,  "Necropolis"),
+            (40.0,  -85.0, 13.0, 11, "Infernal Pit"),
+            (-30.0, 90.0,  10.0, 6,  "Crystal Caverns"),
+            (100.0, -90.0, 14.0, 18, "Abyssal Depths"),
+            (-110.0, 70.0,  12.0, 13, "Sunken Temple"),
+            (120.0,  0.0,   11.0, 16, "Volcanic Forge"),
+            (0.0,    120.0, 13.0, 14, "Frostbite Cavern"),
+            (-40.0, -120.0, 12.0, 20, "Demon's Throne"),
+            (80.0,   100.0, 10.0, 17, "Sky Citadel"),
+            // New endgame dungeons
+            (140.0,  -50.0, 11.0, 22, "Ashfall Furnace"),
+            (-140.0, -70.0, 12.0, 19, "Twilight Sanctum"),
+            (130.0,  100.0, 13.0, 25, "Celestial Spire"),
+        ];
+
+        for &(cx, cy, radius, boost, name) in DUNGEONS {
+            let dx = wx - cx;
+            let dy = wy - cy;
+            if (dx * dx + dy * dy).sqrt() <= radius {
+                return Some((name, boost));
+            }
+        }
+        None
     }
 
     /// Get spawn points for enemies in a chunk
@@ -153,7 +331,11 @@ impl WorldGenerator {
         let seed = self.seed as i64;
         let hash_base = (chunk_x as i64 * 374761393 + chunk_y as i64 * 668265263 + seed) as u64;
 
-        let num_enemies = 2 + (hash_base % 4) as usize; // 2-5 enemies per chunk
+        let num_enemies = if self.get_dungeon_boost(center_x, center_y) > 0 {
+            4 + (hash_base % 5) as usize // 4-8 enemies in dungeons
+        } else {
+            2 + (hash_base % 4) as usize // 2-5 enemies normally
+        };
 
         for i in 0..num_enemies {
             let h = hash_base.wrapping_mul(i as u64 + 1).wrapping_add(1013904223);

@@ -34,6 +34,18 @@ pub const MSG_GUILD_ACTION: u8 = 26;        // Client → Server: guild actions 
 pub const MSG_ENCHANT_ITEM: u8 = 27;        // Client → Server: enchant an item
 pub const MSG_FISHING_ACTION: u8 = 28;      // Client → Server: start/reel fishing
 pub const MSG_FACTION_ACTION: u8 = 29;      // Client → Server: faction join/leave/info
+pub const MSG_SET_TITLE: u8 = 30;           // Client → Server: set active title
+pub const MSG_GATHER_ACTION: u8 = 32;       // Client → Server: mine/gather a node
+pub const MSG_LEADERBOARD_REQUEST: u8 = 33;  // Client → Server: request leaderboard data
+pub const MSG_AUCTION_ACTION: u8 = 34;       // Client → Server: auction house actions (list/buy/cancel/search)
+pub const MSG_MOUNT_ACTION: u8 = 35;        // Client → Server: mount/dismount
+pub const MSG_MAIL_ACTION: u8 = 36;         // Client → Server: send/read/delete mail
+pub const MSG_ARENA_ACTION: u8 = 37;        // Client → Server: join/leave arena queue
+pub const MSG_DAILY_QUEST_CLAIM: u8 = 38;   // Client → Server: claim daily quest reward
+pub const MSG_BUY_BLESSING: u8 = 40;        // Client → Server: buy a specific blessing (bitmask)
+pub const MSG_BESTIARY_REQUEST: u8 = 41;     // Client → Server: request bestiary data
+pub const MSG_BOUNTY_ACTION: u8 = 42;       // Client → Server: place bounty / list bounties
+pub const MSG_RUNE_CRAFT: u8 = 43;          // Client → Server: craft a rune from Blank Rune
 
 // Server → Client
 pub const MSG_AUTH_RESULT: u8 = 50;
@@ -72,6 +84,22 @@ pub const MSG_GUILD_CHAT: u8 = 88;         // Server → Client: guild chat mess
 pub const MSG_ENCHANT_RESULT: u8 = 89;      // Server → Client: enchant result
 pub const MSG_FISHING_RESULT: u8 = 90;      // Server → Client: fishing catch result
 pub const MSG_FACTION_DATA: u8 = 91;        // Server → Client: faction rep/info
+pub const MSG_WEATHER_UPDATE: u8 = 92;      // Server → Client: weather change
+pub const MSG_TITLE_UPDATE: u8 = 93;       // Server → Client: title unlocks/active title
+pub const MSG_GATHER_RESULT: u8 = 95;      // Server → Client: gather/mine result
+pub const MSG_PET_ACTION: u8 = 31;         // Client → Server: pet actions (summon, dismiss, rename, feed, hatch)
+pub const MSG_PET_UPDATE: u8 = 94;         // Server → Client: pet data update
+pub const MSG_LEADERBOARD_DATA: u8 = 96;    // Server → Client: leaderboard rankings
+pub const MSG_AUCTION_DATA: u8 = 97;         // Server → Client: auction listings/results
+pub const MSG_MOUNT_UPDATE: u8 = 98;         // Server → Client: mount state change
+pub const MSG_MAIL_DATA: u8 = 99;            // Server → Client: mailbox data
+pub const MSG_ARENA_UPDATE: u8 = 100;        // Server → Client: arena match/result
+pub const MSG_DAILY_QUEST_DATA: u8 = 101;    // Server → Client: daily quest list/progress
+pub const MSG_WORLD_EVENT_ACTIVE: u8 = 102;  // Server → Client: active world event info
+pub const MSG_BLESSING_UPDATE: u8 = 104;     // Server → Client: blessings bitmask update
+pub const MSG_BESTIARY_DATA: u8 = 105;       // Server → Client: bestiary entries
+pub const MSG_BOUNTY_UPDATE: u8 = 106;      // Server → Client: bounty update / bounty list
+pub const MSG_RUNE_RESULT: u8 = 107;        // Server → Client: rune craft result
 
 // ─── Message Envelope ────────────────────────────────────────
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -172,6 +200,16 @@ pub struct EntityState {
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub direction: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skull: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mounted: Option<bool>,
+    #[serde(rename = "mountName")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mount_name: Option<String>,
+    #[serde(rename = "arenaRating")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub arena_rating: Option<i32>,
 }
 
 // ─── Chunk Data ──────────────────────────────────────────────
@@ -229,7 +267,21 @@ pub struct GuildData {
     pub bank_gold: u64,
 }
 
-// ─── Player Data ─────────────────────────────────────────────
+// ─── Auction House ──────────────────────────────────────────
+#[derive(Debug, Clone)]
+pub struct AuctionListing {
+    pub id: Uuid,
+    pub seller_id: Uuid,
+    pub seller_name: String,
+    pub item: Item,
+    pub price: u64,
+    pub listed_at: u64, // tick when listed
+    pub duration: u64,  // ticks until expiry (default 24000 = ~20 min at 20tps)
+}
+
+pub const AUCTION_TAX_RATE: f64 = 0.05; // 5% listing fee
+pub const AUCTION_DURATION_TICKS: u64 = 24000; // ~20 min at 20 tps
+pub const AUCTION_MAX_LISTINGS: usize = 10; // max per player
 #[derive(Debug, Clone)]
 pub struct PlayerData {
     pub id: Uuid,
@@ -277,9 +329,94 @@ pub struct PlayerData {
     pub unlocked_titles: Vec<String>,
     // Fishing stats
     pub fish_caught: u32,
+    // Crafting stats
+    pub crafts_count: u32,
     // Daily login
-    pub last_login_day: u32,  // day counter for daily rewards
+    pub last_login_day: u32,
     pub login_streak: u32,
+    // Achievement trackers
+    pub items_enchanted: u32,
+    pub guilds_joined: u32,
+    pub guilds_created: u32,
+    pub bosses_killed: u32,
+    pub max_login_streak: u32,
+    pub faction_friendly_count: u32,
+    pub faction_honored_count: u32,
+    pub faction_exalted_count: u32,
+    // Pet / Companion system
+    pub active_pet: Option<PetData>,
+    pub pet_collection: Vec<PetData>,
+    // Mining/Gathering
+    pub mining_level: u32,
+    pub mining_xp: u64,
+    pub gathering_level: u32,
+    pub gathering_xp: u64,
+    pub last_gather_tick: u64,
+    // PvP Skull System (Tibia-style)
+    pub skull_type: u8,        // 0=none, 1=white, 2=red, 3=black
+    pub skull_timer: u64,      // ticks remaining on skull
+    pub pvp_kills_today: u32,  // kills in current "day" cycle
+    pub pvp_day_tick: u64,     // tick when day counter resets
+    // Blessings (death penalty reduction, bitmask)
+    pub blessings: u8,         // bitmask: bit0=Adventurer, bit1=Spiritual, bit2=Phoenix, bit3=Embrace, bit4=Twist of Fate
+    // Stamina (Tibia-style)
+    pub stamina_minutes: u32,  // Max 2520 (42h). > 2400 = bonus XP zone
+    pub last_stamina_tick: u64,
+    // Bestiary
+    pub bestiary: HashMap<String, u32>, // enemy_type → kill_count
+    // Party stat buffs (recalculated periodically)
+    pub party_bonus_atk: i32,
+    pub party_bonus_def: i32,
+    pub party_bonus_hp: i32,
+    // Combat combo system
+    pub combo_count: u32,
+    pub combo_timer: f64,  // ticks until combo resets
+    // Mount system
+    pub mounted: bool,
+    pub mount_speed_bonus: f64, // 0.0 = no mount, 0.3-1.0 = horse-dragon
+    pub mount_name: String,
+    // Daily quests
+    pub daily_quests: Vec<DailyQuest>,
+    pub daily_reset_tick: u64, // tick when dailies reset
+    // Mail system
+    pub mailbox: Vec<MailMessage>,
+    // Arena PvP
+    pub arena_rating: i32,
+    pub arena_wins: u32,
+    pub arena_losses: u32,
+    pub arena_queue: bool,  // waiting for match
+    // Trade
+    pub trade_partner: Option<uuid::Uuid>,
+    pub trade_offer_items: Vec<usize>,  // inventory slot indices
+    pub trade_offer_gold: u64,
+    pub trade_confirmed: bool,
+    // Bounty
+    pub bounty_gold: u64,  // total bounty on this player's head
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct DailyQuest {
+    pub quest_id: String,
+    pub title: String,
+    pub description: String,
+    pub objective: String,     // "kill_enemies", "gather_resources", "craft_items", "earn_gold", "complete_dungeon"
+    pub target: u32,
+    pub progress: u32,
+    pub completed: bool,
+    pub reward_xp: u64,
+    pub reward_gold: u64,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct MailMessage {
+    pub id: String,
+    pub from: String,
+    pub subject: String,
+    pub body: String,
+    pub gold: u64,
+    pub item: Option<Item>,
+    pub read: bool,
+    pub tick: u64,
 }
 
 impl PlayerData {
@@ -341,8 +478,52 @@ impl PlayerData {
             active_title: String::new(),
             unlocked_titles: Vec::new(),
             fish_caught: 0,
+            crafts_count: 0,
             last_login_day: 0,
             login_streak: 0,
+            items_enchanted: 0,
+            guilds_joined: 0,
+            guilds_created: 0,
+            bosses_killed: 0,
+            max_login_streak: 0,
+            faction_friendly_count: 0,
+            faction_honored_count: 0,
+            faction_exalted_count: 0,
+            active_pet: None,
+            pet_collection: Vec::new(),
+            mining_level: 1,
+            mining_xp: 0,
+            gathering_level: 1,
+            gathering_xp: 0,
+            last_gather_tick: 0,
+            skull_type: 0,
+            skull_timer: 0,
+            pvp_kills_today: 0,
+            pvp_day_tick: 0,
+            blessings: 0,
+            stamina_minutes: 2520,
+            last_stamina_tick: 0,
+            bestiary: HashMap::new(),
+            party_bonus_atk: 0,
+            party_bonus_def: 0,
+            party_bonus_hp: 0,
+            combo_count: 0,
+            combo_timer: 0.0,
+            mounted: false,
+            mount_speed_bonus: 0.0,
+            mount_name: String::new(),
+            daily_quests: Vec::new(),
+            daily_reset_tick: 0,
+            mailbox: Vec::new(),
+            arena_rating: 1000,
+            arena_wins: 0,
+            arena_losses: 0,
+            arena_queue: false,
+            trade_partner: None,
+            trade_offer_items: Vec::new(),
+            trade_offer_gold: 0,
+            trade_confirmed: false,
+            bounty_gold: 0,
         }
     }
 
@@ -358,6 +539,10 @@ impl PlayerData {
             level: Some(self.level),
             name: Some(self.username.clone()),
             direction: None,
+            skull: if self.skull_type > 0 { Some(self.skull_type) } else { None },
+            mounted: if self.mounted { Some(true) } else { None },
+            mount_name: if self.mounted { Some(self.mount_name.clone()) } else { None },
+            arena_rating: if self.arena_rating != 1000 { Some(self.arena_rating) } else { None },
         }
     }
 
@@ -380,7 +565,8 @@ impl PlayerData {
             .filter(|(_, stat, _)| *stat == "ATK")
             .map(|(_, _, val)| val)
             .sum();
-        self.atk + equip_bonus + set_bonus
+        let pet_bonus = self.pet_bonus("ATK");
+        self.atk + equip_bonus + set_bonus + pet_bonus + self.party_bonus_atk
     }
 
     /// Total DEF including equipment bonuses
@@ -393,7 +579,8 @@ impl PlayerData {
             .filter(|(_, stat, _)| *stat == "DEF")
             .map(|(_, _, val)| val)
             .sum();
-        self.def + equip_bonus + set_bonus
+        let pet_bonus = self.pet_bonus("DEF");
+        self.def + equip_bonus + set_bonus + pet_bonus + self.party_bonus_def
     }
 
     pub fn total_lck(&self) -> i32 {
@@ -405,7 +592,8 @@ impl PlayerData {
             .filter(|(_, stat, _)| *stat == "LCK")
             .map(|(_, _, val)| val)
             .sum();
-        self.lck + equip_bonus + set_bonus
+        let pet_bonus = self.pet_bonus("LCK");
+        self.lck + equip_bonus + set_bonus + pet_bonus
     }
 
     pub fn total_hp_bonus(&self) -> i32 {
@@ -417,7 +605,8 @@ impl PlayerData {
             .filter(|(_, stat, _)| *stat == "HP")
             .map(|(_, _, val)| val)
             .sum();
-        equip_bonus + set_bonus
+        let pet_bonus = self.pet_bonus("HP");
+        equip_bonus + set_bonus + pet_bonus + self.party_bonus_hp
     }
 
     pub fn total_mp_bonus(&self) -> i32 {
@@ -429,7 +618,8 @@ impl PlayerData {
             .filter(|(_, stat, _)| *stat == "MP")
             .map(|(_, _, val)| val)
             .sum();
-        equip_bonus + set_bonus
+        let pet_bonus = self.pet_bonus("MP");
+        equip_bonus + set_bonus + pet_bonus
     }
 
     pub fn total_spd_bonus(&self) -> i32 {
@@ -441,7 +631,16 @@ impl PlayerData {
             .filter(|(_, stat, _)| *stat == "SPD")
             .map(|(_, _, val)| val)
             .sum();
-        equip_bonus + set_bonus
+        let pet_bonus = self.pet_bonus("SPD");
+        equip_bonus + set_bonus + pet_bonus
+    }
+
+    /// Returns the bonus value from the active pet for a given stat key.
+    fn pet_bonus(&self, stat: &str) -> i32 {
+        match &self.active_pet {
+            Some(pet) if pet.bonus_stat == stat => pet.bonus_value,
+            _ => 0,
+        }
     }
 
     /// Try to add item to first free inventory slot. Returns false if full.
@@ -619,6 +818,7 @@ pub struct EnemyData {
     pub modifiers: Vec<EnemyModifier>,
     pub attack_cooldown: f64,
     pub flee_cooldown: f64, // ticks before enemy can re-aggro after fleeing
+    pub stun_ticks: u32,    // CC: cannot move or attack while > 0
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -630,6 +830,56 @@ pub enum EnemyState {
     Dead,
     Flee,   // retreating away from town safe zone
 }
+
+// ─── Pet / Companion System ──────────────────────────────────
+
+#[derive(Clone, Debug)]
+pub struct PetData {
+    pub id: String,
+    pub name: String,
+    pub pet_type: String,  // "wolf", "cat", "phoenix", etc.
+    pub icon: String,      // emoji
+    pub level: u32,
+    pub xp: u64,
+    pub xp_to_next: u64,
+    pub bonus_stat: String, // "ATK", "DEF", "LCK", "HP", "SPD", "MP"
+    pub bonus_value: i32,
+    pub rarity: u8,        // 0-5
+}
+
+impl PetData {
+    pub fn to_payload(&self) -> serde_json::Value {
+        serde_json::json!({
+            "id": self.id,
+            "name": self.name,
+            "petType": self.pet_type,
+            "icon": self.icon,
+            "level": self.level,
+            "xp": self.xp,
+            "xpToNext": self.xp_to_next,
+            "bonusStat": self.bonus_stat,
+            "bonusValue": self.bonus_value,
+            "rarity": self.rarity,
+        })
+    }
+}
+
+pub const PET_CATALOG: &[(&str, &str, &str, &str, i32, u8)] = &[
+    // (pet_type, name, icon, bonus_stat, bonus_value_per_level, rarity)
+    ("wolf",        "Wolf Pup",         "🐺", "ATK", 2, 0),
+    ("cat",         "Shadow Cat",       "🐱", "LCK", 3, 0),
+    ("owl",         "Wise Owl",         "🦉", "MP",  2, 1),
+    ("bear",        "Bear Cub",         "🐻", "HP",  5, 1),
+    ("hawk",        "Battle Hawk",      "🦅", "SPD", 2, 1),
+    ("fox",         "Mystic Fox",       "🦊", "LCK", 4, 2),
+    ("dragon",      "Baby Dragon",      "🐉", "ATK", 4, 2),
+    ("phoenix",     "Phoenix Hatchling","🔥", "HP",  8, 3),
+    ("unicorn",     "Unicorn Foal",     "🦄", "MP",  5, 3),
+    ("cerberus",    "Cerberus Pup",     "👹", "DEF", 5, 3),
+    ("fairy",       "Fairy Companion",  "🧚", "LCK", 6, 4),
+    ("golem",       "Stone Golem",      "🪨", "DEF", 7, 4),
+    ("void_spirit", "Void Spirit",      "👻", "ATK", 8, 5),
+];
 
 // ─── Status Effects ──────────────────────────────────────────
 
@@ -721,6 +971,10 @@ impl EnemyData {
             level: Some(self.level),
             name: Some(format!("{}{}", rank_prefix, self.name)),
             direction: None,
+            skull: None,
+            mounted: None,
+            mount_name: None,
+            arena_rating: None,
         }
     }
 }
@@ -1090,6 +1344,67 @@ pub fn generate_loot(zone_level: u32, enemy_level: u32, luck_bonus: i32) -> Vec<
         loot.push(Item::new_material("Enchanting Stone", 1, 1));
     }
 
+    // 18% chance to drop a consumable (potions, food, elixirs, scrolls)
+    if rng.gen_bool(0.18) {
+        let potion_roll: f64 = rng.r#gen();
+        let (consumable_name, rarity) = if zone_level >= 20 && potion_roll < 0.05 {
+            ("Divine Health Potion", 3)
+        } else if zone_level >= 15 && potion_roll < 0.12 {
+            ("Supreme Health Potion", 2)
+        } else if zone_level >= 8 && potion_roll < 0.25 {
+            ("Greater Health Potion", 1)
+        } else if potion_roll < 0.38 {
+            ("Health Potion", 0)
+        } else if potion_roll < 0.48 {
+            ("Mana Potion", 0)
+        } else if zone_level >= 10 && potion_roll < 0.52 {
+            ("Greater Mana Potion", 1)
+        } else if potion_roll < 0.58 {
+            ("Bread", 0)
+        } else if potion_roll < 0.64 {
+            ("Cooked Meat", 0)
+        } else if zone_level >= 5 && potion_roll < 0.69 {
+            ("Grilled Fish", 0)
+        } else if potion_roll < 0.74 {
+            ("Strength Elixir", 2)
+        } else if potion_roll < 0.78 {
+            ("Fortune Elixir", 2)
+        } else if zone_level >= 10 && potion_roll < 0.82 {
+            ("Speed Elixir", 2)
+        } else if zone_level >= 12 && potion_roll < 0.86 {
+            ("Defense Elixir", 2)
+        } else if zone_level >= 15 && potion_roll < 0.89 {
+            ("Berserker Draught", 3)
+        } else if zone_level >= 8 && potion_roll < 0.92 {
+            ("Scroll of Town Portal", 1)
+        } else if zone_level >= 15 && potion_roll < 0.95 {
+            ("Scroll of Identify", 1)
+        } else if zone_level >= 20 && potion_roll < 0.97 {
+            ("Elixir of Experience", 3)
+        } else {
+            ("Antidote", 0)
+        };
+        loot.push(Item::new_consumable(consumable_name, rarity, 1));
+    }
+
+    // 2% chance to drop a Pet Egg
+    if rng.gen_bool(0.02) {
+        let catalog_entry = PET_CATALOG[rng.gen_range(0..PET_CATALOG.len())];
+        let (pet_type, pet_name, pet_icon, _, _, egg_rarity) = catalog_entry;
+        let egg_name = format!("Pet Egg ({})", pet_name);
+        let template_id = format!("pet_egg_{}", pet_type);
+        let mut egg = Item::new_material(&egg_name, egg_rarity, 1);
+        egg.template_id = template_id;
+        egg.stackable = false; // each egg is unique
+        egg.description = format!("{} Hatch to summon a {} companion!", pet_icon, pet_name);
+        loot.push(egg);
+    }
+
+    // 5% chance to drop a Blank Rune
+    if rng.gen_bool(0.05) {
+        loot.push(Item::new_material("Blank Rune", 1, 1));
+    }
+
     loot
 }
 
@@ -1176,7 +1491,7 @@ pub fn enemy_gold_reward(zone_level: u32, enemy_level: u32) -> u64 {
     (base as f64 * variance) as u64
 }
 
-/// Calculate items dropped on PvP death (30% chance per inventory item)
+/// Calculate items dropped on PvP death — skull-based drop rates
 pub fn pvp_death_drops(player: &mut PlayerData) -> (Vec<Item>, u64) {
     let mut rng = rand::thread_rng();
     let mut dropped = Vec::new();
@@ -1186,19 +1501,45 @@ pub fn pvp_death_drops(player: &mut PlayerData) -> (Vec<Item>, u64) {
         return (dropped, 0);
     }
 
-    // Drop 30% of inventory items
+    // Drop chance based on skull type of the DYING player
+    // Blessings (bitmask) reduce drop chance by 8% each (up to 40% with 5)
+    let base_drop_chance: f64 = match player.skull_type {
+        3 => 0.80, // Black skull: drop 80%
+        2 => 0.50, // Red skull: drop 50%
+        _ => 0.30, // Normal/white: drop 30%
+    };
+    let blessing_count = player.blessings.count_ones() as f64;
+    let blessing_reduction = blessing_count * 0.08;
+    let drop_chance = (base_drop_chance - blessing_reduction).max(0.05);
+
+    // Drop inventory items
     for slot in player.inventory.iter_mut() {
         if let Some(item) = slot {
-            if rng.gen_bool(0.30) {
+            if rng.gen_bool(drop_chance) {
                 dropped.push(item.clone());
                 *slot = None;
             }
         }
     }
 
-    // Drop 10% of gold
-    let gold_drop = player.gold / 10;
+    // Gold drop scales with skull too
+    let gold_pct = match player.skull_type {
+        3 => 50, // Black: lose 50%
+        2 => 30, // Red: lose 30%
+        _ => 10, // Normal: lose 10%
+    };
+    let gold_drop = player.gold * gold_pct / 100;
     player.gold -= gold_drop;
+
+    // Consume blessings on death: Twist of Fate (bit4) preserves other blessings
+    if player.blessings > 0 {
+        if player.blessings & (1 << 4) != 0 {
+            // Has Twist of Fate: only consume bit4, keep rest
+            player.blessings &= !(1 << 4);
+        } else {
+            player.blessings = 0;
+        }
+    }
 
     (dropped, gold_drop)
 }
@@ -1369,6 +1710,226 @@ pub static QUEST_CATALOG: &[QuestDef] = &[
         objectives: &[QuestObjDef { description: "Kill 100 enemies (total)", obj_type: "kill", target: "", count: 100 }],
         reward_xp: 1500, reward_gold: 800, reward_items: &[],
     },
+    // === Class Trials (Lv 15-25) ===
+    QuestDef {
+        id: "warrior_trial", title: "Trial of the Warrior", icon: "🗡️",
+        description: "Face the toughest enemies to prove your strength.",
+        min_level: 15, prerequisites: &[],
+        objectives: &[
+            QuestObjDef { description: "Kill 20 Elite enemies", obj_type: "kill_rank", target: "elite", count: 20 },
+            QuestObjDef { description: "Reach 50 ATK", obj_type: "stat_min", target: "atk", count: 50 },
+        ],
+        reward_xp: 3000, reward_gold: 2000, reward_items: &[("Gladiator's Blade", 3, 20)],
+    },
+    QuestDef {
+        id: "mage_trial", title: "Trial of the Arcane", icon: "🔮",
+        description: "Demonstrate mastery over the magical arts.",
+        min_level: 15, prerequisites: &[],
+        objectives: &[
+            QuestObjDef { description: "Craft 10 runes", obj_type: "craft", target: "rune", count: 10 },
+            QuestObjDef { description: "Kill 15 enemies with spells", obj_type: "kill", target: "", count: 15 },
+        ],
+        reward_xp: 3000, reward_gold: 2000, reward_items: &[("Archmage's Staff", 3, 20)],
+    },
+    QuestDef {
+        id: "rogue_trial", title: "Trial of Shadows", icon: "🗡️",
+        description: "Prove you can strike unseen and escape unharmed.",
+        min_level: 15, prerequisites: &[],
+        objectives: &[
+            QuestObjDef { description: "Kill 30 enemies", obj_type: "kill", target: "", count: 30 },
+            QuestObjDef { description: "Collect 5000 gold", obj_type: "gold", target: "", count: 5000 },
+        ],
+        reward_xp: 3000, reward_gold: 2000, reward_items: &[("Shadow Dagger", 3, 20)],
+    },
+    QuestDef {
+        id: "ranger_trial", title: "Trial of the Wild", icon: "🏹",
+        description: "Master the wilds and hunt the most dangerous beasts.",
+        min_level: 15, prerequisites: &[],
+        objectives: &[
+            QuestObjDef { description: "Kill 10 different enemy types", obj_type: "kill", target: "", count: 10 },
+            QuestObjDef { description: "Catch 20 fish", obj_type: "craft", target: "fish", count: 20 },
+        ],
+        reward_xp: 3000, reward_gold: 2000, reward_items: &[("Elven Longbow", 3, 20)],
+    },
+    // === Story Arc: The Corruption (Lv 10-30) ===
+    QuestDef {
+        id: "corruption_1", title: "Whispers in the Dark", icon: "🌑",
+        description: "Strange creatures have been spotted near the towns. Investigate the source.",
+        min_level: 10, prerequisites: &[],
+        objectives: &[
+            QuestObjDef { description: "Kill 15 Undead enemies", obj_type: "kill_type", target: "skeleton", count: 15 },
+            QuestObjDef { description: "Visit the Swamp biome", obj_type: "visit_biome", target: "swamp", count: 1 },
+        ],
+        reward_xp: 2000, reward_gold: 1000, reward_items: &[],
+    },
+    QuestDef {
+        id: "corruption_2", title: "The Plagued Lands", icon: "☠️",
+        description: "The corruption spreads. Push deeper into the infected zones.",
+        min_level: 15, prerequisites: &["corruption_1"],
+        objectives: &[
+            QuestObjDef { description: "Kill 25 Swamp enemies", obj_type: "kill_type", target: "swamp", count: 25 },
+            QuestObjDef { description: "Collect 10 materials", obj_type: "collect", target: "material", count: 10 },
+        ],
+        reward_xp: 3500, reward_gold: 1500, reward_items: &[("Purification Amulet", 2, 15)],
+    },
+    QuestDef {
+        id: "corruption_3", title: "Heart of Darkness", icon: "💀",
+        description: "A powerful necromancer controls the corruption. End this threat.",
+        min_level: 25, prerequisites: &["corruption_2"],
+        objectives: &[
+            QuestObjDef { description: "Kill 5 Boss enemies", obj_type: "kill_rank", target: "boss", count: 5 },
+            QuestObjDef { description: "Reach level 25", obj_type: "level", target: "", count: 25 },
+        ],
+        reward_xp: 8000, reward_gold: 5000, reward_items: &[("Crown of the Undying", 4, 25)],
+    },
+    // === Endgame Challenges (Lv 30+) ===
+    QuestDef {
+        id: "dragon_slayer", title: "Dragon Slayer", icon: "🐉",
+        description: "The great dragon terrorizes the realm. Only the bravest dare challenge it.",
+        min_level: 35, prerequisites: &[],
+        objectives: &[
+            QuestObjDef { description: "Kill 3 World Bosses", obj_type: "kill_rank", target: "boss", count: 3 },
+            QuestObjDef { description: "Reach level 35", obj_type: "level", target: "", count: 35 },
+        ],
+        reward_xp: 15000, reward_gold: 10000, reward_items: &[("Dragonscale Armor", 4, 35)],
+    },
+    QuestDef {
+        id: "pvp_champion", title: "Champion of the Arena", icon: "🏆",
+        description: "Prove your might against other players in the arena.",
+        min_level: 20, prerequisites: &[],
+        objectives: &[
+            QuestObjDef { description: "Win 25 Arena matches", obj_type: "kill", target: "arena_wins", count: 25 },
+        ],
+        reward_xp: 5000, reward_gold: 3000, reward_items: &[("Champion's Ring", 3, 20)],
+    },
+    QuestDef {
+        id: "master_crafter", title: "Master of the Forge", icon: "🔨",
+        description: "Achieve true mastery of the crafting arts.",
+        min_level: 20, prerequisites: &[],
+        objectives: &[
+            QuestObjDef { description: "Craft 50 items", obj_type: "craft", target: "", count: 50 },
+            QuestObjDef { description: "Mine 100 ore", obj_type: "craft", target: "mine", count: 100 },
+        ],
+        reward_xp: 4000, reward_gold: 3000, reward_items: &[("Artisan's Hammer", 3, 20)],
+    },
+    QuestDef {
+        id: "wealth_collector", title: "The Treasure Hoarder", icon: "💰",
+        description: "Amass an incredible fortune through any means necessary.",
+        min_level: 15, prerequisites: &[],
+        objectives: &[
+            QuestObjDef { description: "Accumulate 50000 gold", obj_type: "gold", target: "", count: 50000 },
+        ],
+        reward_xp: 3000, reward_gold: 10000, reward_items: &[],
+    },
+    QuestDef {
+        id: "explorer_supreme", title: "Explorer Supreme", icon: "🗺️",
+        description: "Visit every biome in the realm and uncover its secrets.",
+        min_level: 10, prerequisites: &[],
+        objectives: &[
+            QuestObjDef { description: "Visit the Desert biome", obj_type: "visit_biome", target: "desert", count: 1 },
+            QuestObjDef { description: "Visit the Tundra biome", obj_type: "visit_biome", target: "tundra", count: 1 },
+            QuestObjDef { description: "Visit the Mountain biome", obj_type: "visit_biome", target: "mountain", count: 1 },
+            QuestObjDef { description: "Visit the Swamp biome", obj_type: "visit_biome", target: "swamp", count: 1 },
+        ],
+        reward_xp: 2500, reward_gold: 1500, reward_items: &[("Explorer's Boots", 2, 10)],
+    },
+    QuestDef {
+        id: "bounty_hunter", title: "Bounty Hunter", icon: "🏴‍☠️",
+        description: "Track down and eliminate wanted criminals.",
+        min_level: 20, prerequisites: &[],
+        objectives: &[
+            QuestObjDef { description: "Kill 10 players with bounties", obj_type: "kill", target: "pvp_kills", count: 10 },
+        ],
+        reward_xp: 5000, reward_gold: 5000, reward_items: &[],
+    },
+    QuestDef {
+        id: "guild_hero", title: "Guild Hero", icon: "🏰",
+        description: "Lead your guild to greatness through dedicated service.",
+        min_level: 15, prerequisites: &[],
+        objectives: &[
+            QuestObjDef { description: "Kill 200 enemies while in a guild", obj_type: "kill", target: "", count: 200 },
+        ],
+        reward_xp: 4000, reward_gold: 3000, reward_items: &[("Guild Banner", 2, 15)],
+    },
+    QuestDef {
+        id: "legendary_quest", title: "The Legendary Path", icon: "⭐",
+        description: "Only the greatest heroes can walk this path. Reach the pinnacle of power.",
+        min_level: 40, prerequisites: &["dragon_slayer", "corruption_3"],
+        objectives: &[
+            QuestObjDef { description: "Reach level 45", obj_type: "level", target: "", count: 45 },
+            QuestObjDef { description: "Kill 500 enemies", obj_type: "kill", target: "", count: 500 },
+            QuestObjDef { description: "Craft 100 items", obj_type: "craft", target: "", count: 100 },
+        ],
+        reward_xp: 50000, reward_gold: 25000, reward_items: &[("Godly Amulet of Kings", 5, 45)],
+    },
+    // === Dungeon Expedition Quests ===
+    QuestDef {
+        id: "ashfall_expedition", title: "Into the Furnace", icon: "🔥",
+        description: "The Ashfall Furnace has awoken. Brave its molten depths.",
+        min_level: 30, prerequisites: &["corruption_3"],
+        objectives: &[
+            QuestObjDef { description: "Kill 40 enemies in Ashfall Furnace", obj_type: "kill", target: "", count: 40 },
+            QuestObjDef { description: "Reach level 35", obj_type: "level", target: "", count: 35 },
+        ],
+        reward_xp: 20000, reward_gold: 12000, reward_items: &[("Obsidian Shard", 3, 30)],
+    },
+    QuestDef {
+        id: "twilight_expedition", title: "Shadows of Twilight", icon: "🌙",
+        description: "An ancient evil stirs in the Twilight Sanctum. Investigate the darkness.",
+        min_level: 25, prerequisites: &["undead_purge"],
+        objectives: &[
+            QuestObjDef { description: "Kill 35 enemies in Twilight Sanctum", obj_type: "kill", target: "", count: 35 },
+        ],
+        reward_xp: 15000, reward_gold: 8000, reward_items: &[("Shadow Essence", 3, 25)],
+    },
+    QuestDef {
+        id: "celestial_ascent", title: "Celestial Ascension", icon: "⭐",
+        description: "The Celestial Spire calls only the worthy. Ascend and prove yourself.",
+        min_level: 40, prerequisites: &["legendary_quest"],
+        objectives: &[
+            QuestObjDef { description: "Kill 50 enemies in Celestial Spire", obj_type: "kill", target: "", count: 50 },
+            QuestObjDef { description: "Reach level 48", obj_type: "level", target: "", count: 48 },
+        ],
+        reward_xp: 60000, reward_gold: 30000, reward_items: &[("Crown of Constellations", 5, 45)],
+    },
+    // === Daily/Repeatable Style Quests ===
+    QuestDef {
+        id: "bounty_hunter", title: "The Bounty Hunter", icon: "🏴‍☠️",
+        description: "Prove yourself as a hunter of men. Track down bounty targets.",
+        min_level: 15, prerequisites: &[],
+        objectives: &[
+            QuestObjDef { description: "Kill 5 players with bounties", obj_type: "kill", target: "", count: 5 },
+        ],
+        reward_xp: 8000, reward_gold: 5000, reward_items: &[("Hunter's Badge", 3, 15)],
+    },
+    QuestDef {
+        id: "rune_scholar", title: "The Rune Scholar", icon: "🔮",
+        description: "Master the ancient art of rune crafting.",
+        min_level: 10, prerequisites: &[],
+        objectives: &[
+            QuestObjDef { description: "Craft 10 runes", obj_type: "craft", target: "", count: 10 },
+        ],
+        reward_xp: 5000, reward_gold: 3000, reward_items: &[("Blank Rune", 2, 10)],
+    },
+    QuestDef {
+        id: "explorer_frontier", title: "Frontier Explorer", icon: "🗺️",
+        description: "Venture to the farthest reaches of the world.",
+        min_level: 20, prerequisites: &[],
+        objectives: &[
+            QuestObjDef { description: "Kill 20 enemies level 25+", obj_type: "kill", target: "", count: 20 },
+            QuestObjDef { description: "Kill 10 elite enemies", obj_type: "kill", target: "", count: 10 },
+        ],
+        reward_xp: 10000, reward_gold: 6000, reward_items: &[("Explorer's Compass", 3, 20)],
+    },
+    QuestDef {
+        id: "master_crafter", title: "Master Artisan", icon: "🔨",
+        description: "Become a master of all crafts.",
+        min_level: 25, prerequisites: &["rune_scholar"],
+        objectives: &[
+            QuestObjDef { description: "Craft 50 items total", obj_type: "craft", target: "", count: 50 },
+        ],
+        reward_xp: 12000, reward_gold: 8000, reward_items: &[("Master Crafter's Hammer", 4, 25)],
+    },
 ];
 
 // ─── Achievement Catalog ─────────────────────────────────────
@@ -1425,6 +1986,86 @@ pub static ACHIEVEMENT_CATALOG: &[AchievementDef] = &[
     AchievementDef { id: "gold_10k", title: "Rich", description: "Earn 10,000 gold total.", icon: "💎", category: "social", tracker: "gold_earned", target: 10000 },
     AchievementDef { id: "trade_1", title: "Trader", description: "Complete your first trade.", icon: "🤝", category: "social", tracker: "trades_completed", target: 1 },
     AchievementDef { id: "collect_50", title: "Collector", description: "Pick up 50 items.", icon: "🎒", category: "social", tracker: "items_collected", target: 50 },
+    // Fishing
+    AchievementDef { id: "fish_1", title: "Gone Fishin'", description: "Catch your first fish.", icon: "🎣", category: "exploration", tracker: "fish_caught", target: 1 },
+    AchievementDef { id: "fish_10", title: "Fisherman", description: "Catch 10 fish.", icon: "🐟", category: "exploration", tracker: "fish_caught", target: 10 },
+    AchievementDef { id: "fish_50", title: "Master Angler", description: "Catch 50 fish.", icon: "🐠", category: "exploration", tracker: "fish_caught", target: 50 },
+    AchievementDef { id: "fish_100", title: "Legendary Fisher", description: "Catch 100 fish.", icon: "🦈", category: "exploration", tracker: "fish_caught", target: 100 },
+    // Enchanting
+    AchievementDef { id: "enchant_1", title: "Apprentice Enchanter", description: "Enchant your first item.", icon: "✨", category: "crafting", tracker: "items_enchanted", target: 1 },
+    AchievementDef { id: "enchant_10", title: "Enchanter", description: "Enchant 10 items.", icon: "🔮", category: "crafting", tracker: "items_enchanted", target: 10 },
+    AchievementDef { id: "enchant_50", title: "Arcane Master", description: "Enchant 50 items.", icon: "💎", category: "crafting", tracker: "items_enchanted", target: 50 },
+    // Guilds
+    AchievementDef { id: "guild_join", title: "Team Player", description: "Join a guild.", icon: "🏰", category: "social", tracker: "guilds_joined", target: 1 },
+    AchievementDef { id: "guild_create", title: "Guild Founder", description: "Create a guild.", icon: "🏴", category: "social", tracker: "guilds_created", target: 1 },
+    // Factions
+    AchievementDef { id: "faction_friendly", title: "Friendly Face", description: "Reach Friendly with any faction.", icon: "😊", category: "social", tracker: "faction_friendly_count", target: 1 },
+    AchievementDef { id: "faction_honored", title: "Honored", description: "Reach Honored with any faction.", icon: "🎖️", category: "social", tracker: "faction_honored_count", target: 1 },
+    AchievementDef { id: "faction_exalted", title: "Exalted Champion", description: "Reach Exalted with any faction.", icon: "👑", category: "social", tracker: "faction_exalted_count", target: 1 },
+    // Login streaks
+    AchievementDef { id: "login_7", title: "Dedicated", description: "Log in 7 days in a row.", icon: "📅", category: "social", tracker: "max_login_streak", target: 7 },
+    AchievementDef { id: "login_30", title: "Devoted", description: "Log in 30 days in a row.", icon: "🗓️", category: "social", tracker: "max_login_streak", target: 30 },
+    // Boss kills
+    AchievementDef { id: "boss_1", title: "Boss Slayer", description: "Defeat your first boss.", icon: "💀", category: "combat", tracker: "bosses_killed", target: 1 },
+    AchievementDef { id: "boss_5", title: "Boss Hunter", description: "Defeat 5 bosses.", icon: "☠️", category: "combat", tracker: "bosses_killed", target: 5 },
+    AchievementDef { id: "boss_25", title: "Boss Destroyer", description: "Defeat 25 bosses.", icon: "🔥", category: "combat", tracker: "bosses_killed", target: 25 },
+    // High-level combat
+    AchievementDef { id: "killer_500", title: "Exterminator", description: "Defeat 500 enemies.", icon: "💥", category: "combat", tracker: "enemies_killed", target: 500 },
+    AchievementDef { id: "killer_1000", title: "Legendary Warrior", description: "Defeat 1,000 enemies.", icon: "⚡", category: "combat", tracker: "enemies_killed", target: 1000 },
+    // Crafting milestones
+    AchievementDef { id: "craft_100", title: "Grand Artisan", description: "Craft 100 items.", icon: "🏗️", category: "crafting", tracker: "items_crafted", target: 100 },
+    AchievementDef { id: "gold_100k", title: "Mogul", description: "Earn 100,000 gold total.", icon: "🏦", category: "social", tracker: "gold_earned", target: 100000 },
+    // ─── Phase 11: New Achievements ───
+    // PvP achievements
+    AchievementDef { id: "pvp_10", title: "PvP Veteran", description: "Win 10 PvP battles.", icon: "⚔️", category: "combat", tracker: "pvp_kills", target: 10 },
+    AchievementDef { id: "pvp_50", title: "PvP Legend", description: "Win 50 PvP battles.", icon: "🏆", category: "combat", tracker: "pvp_kills", target: 50 },
+    AchievementDef { id: "pvp_100", title: "Gladiator", description: "Win 100 PvP battles.", icon: "👑", category: "combat", tracker: "pvp_kills", target: 100 },
+    // Arena achievements
+    AchievementDef { id: "arena_10", title: "Arena Fighter", description: "Win 10 arena matches.", icon: "🏟️", category: "combat", tracker: "arena_wins", target: 10 },
+    AchievementDef { id: "arena_50", title: "Arena Champion", description: "Win 50 arena matches.", icon: "🏟️", category: "combat", tracker: "arena_wins", target: 50 },
+    // Extreme kill counts
+    AchievementDef { id: "killer_5000", title: "Apocalypse Bringer", description: "Defeat 5,000 enemies.", icon: "🌋", category: "combat", tracker: "enemies_killed", target: 5000 },
+    AchievementDef { id: "killer_10000", title: "God of War", description: "Defeat 10,000 enemies.", icon: "⚡", category: "combat", tracker: "enemies_killed", target: 10000 },
+    // Mining achievements
+    AchievementDef { id: "mine_50", title: "Prospector", description: "Mine 50 nodes.", icon: "⛏️", category: "crafting", tracker: "nodes_mined", target: 50 },
+    AchievementDef { id: "mine_200", title: "Master Miner", description: "Mine 200 nodes.", icon: "⛏️", category: "crafting", tracker: "nodes_mined", target: 200 },
+    // Crafting extreme
+    AchievementDef { id: "craft_500", title: "Legendary Crafter", description: "Craft 500 items.", icon: "🔨", category: "crafting", tracker: "items_crafted", target: 500 },
+    // Gold extreme
+    AchievementDef { id: "gold_1m", title: "Tycoon", description: "Earn 1,000,000 gold total.", icon: "💰", category: "social", tracker: "gold_earned", target: 1000000 },
+    // Boss killing
+    AchievementDef { id: "boss_50", title: "Boss Annihilator", description: "Defeat 50 bosses.", icon: "💀", category: "combat", tracker: "bosses_killed", target: 50 },
+    AchievementDef { id: "boss_100", title: "Raid Master", description: "Defeat 100 bosses.", icon: "👑", category: "combat", tracker: "bosses_killed", target: 100 },
+    // Enchanting
+    AchievementDef { id: "enchant_50", title: "Master Enchanter", description: "Enchant 50 items.", icon: "✨", category: "crafting", tracker: "items_enchanted", target: 50 },
+    // Fishing
+    AchievementDef { id: "fish_100", title: "Master Angler", description: "Catch 100 fish.", icon: "🎣", category: "crafting", tracker: "fish_caught", target: 100 },
+    AchievementDef { id: "fish_500", title: "Legendary Angler", description: "Catch 500 fish.", icon: "🐟", category: "crafting", tracker: "fish_caught", target: 500 },
+    // Level milestones
+    AchievementDef { id: "level_25", title: "Rising Hero", description: "Reach level 25.", icon: "⭐", category: "exploration", tracker: "level", target: 25 },
+    AchievementDef { id: "level_40", title: "Legendary Hero", description: "Reach level 40.", icon: "🌟", category: "exploration", tracker: "level", target: 40 },
+    AchievementDef { id: "level_50", title: "Transcendent", description: "Reach level 50.", icon: "💫", category: "exploration", tracker: "level", target: 50 },
+    // === Dungeon Explorer ===
+    AchievementDef { id: "dungeon_10", title: "Dungeon Crawler", description: "Kill 10 dungeon enemies.", icon: "🏚️", category: "exploration", tracker: "dungeon_kills", target: 10 },
+    AchievementDef { id: "dungeon_50", title: "Dungeon Delver", description: "Kill 50 dungeon enemies.", icon: "🗝️", category: "exploration", tracker: "dungeon_kills", target: 50 },
+    AchievementDef { id: "dungeon_200", title: "Dungeon Master", description: "Kill 200 dungeon enemies.", icon: "🏛️", category: "exploration", tracker: "dungeon_kills", target: 200 },
+    // === Bounty Hunting ===
+    AchievementDef { id: "bounty_claim_1", title: "Bounty Novice", description: "Claim your first bounty.", icon: "🏴‍☠️", category: "combat", tracker: "bounties_claimed", target: 1 },
+    AchievementDef { id: "bounty_claim_10", title: "Bounty Expert", description: "Claim 10 bounties.", icon: "💀", category: "combat", tracker: "bounties_claimed", target: 10 },
+    // === Rune Crafting ===
+    AchievementDef { id: "runes_5", title: "Rune Initiate", description: "Craft 5 runes.", icon: "🔮", category: "crafting", tracker: "runes_crafted", target: 5 },
+    AchievementDef { id: "runes_25", title: "Rune Adept", description: "Craft 25 runes.", icon: "✨", category: "crafting", tracker: "runes_crafted", target: 25 },
+    AchievementDef { id: "runes_100", title: "Rune Master", description: "Craft 100 runes.", icon: "🌟", category: "crafting", tracker: "runes_crafted", target: 100 },
+    // === Economy ===
+    AchievementDef { id: "auction_sell_10", title: "Merchant", description: "Sell 10 items at auction.", icon: "🏪", category: "social", tracker: "auction_sales", target: 10 },
+    AchievementDef { id: "auction_sell_100", title: "Trade Mogul", description: "Sell 100 items at auction.", icon: "💰", category: "social", tracker: "auction_sales", target: 100 },
+    // === Survival ===
+    AchievementDef { id: "deaths_0", title: "Untouchable", description: "Reach level 10 without dying.", icon: "🛡️", category: "progression", tracker: "deathless_to_10", target: 1 },
+    AchievementDef { id: "deaths_50", title: "Persistent", description: "Die 50 times and keep going.", icon: "💪", category: "progression", tracker: "total_deaths", target: 50 },
+    // === Bestiary ===
+    AchievementDef { id: "bestiary_10", title: "Naturalist", description: "Discover 10 enemy species.", icon: "📖", category: "exploration", tracker: "bestiary_entries", target: 10 },
+    AchievementDef { id: "bestiary_30", title: "Zoologist", description: "Discover 30 enemy species.", icon: "📚", category: "exploration", tracker: "bestiary_entries", target: 30 },
+    AchievementDef { id: "bestiary_50", title: "Encyclopedist", description: "Discover 50 enemy species.", icon: "🏆", category: "exploration", tracker: "bestiary_entries", target: 50 },
 ];
 
 // ─── World Boss Definitions ──────────────────────────────────
@@ -1485,6 +2126,119 @@ pub static WORLD_BOSSES: &[WorldBossDef] = &[
         modifiers: &[EnemyModifier::Poisonous, EnemyModifier::Draining, EnemyModifier::Explosive, EnemyModifier::Swift],
         phase_thresholds: &[0.75, 0.50, 0.25],
         summon_count: 6,
+    },
+    WorldBossDef {
+        id: "crystal_queen", name: "Crystalia", title: "the Crystal Queen",
+        spawn_x: -30.0, spawn_y: 95.0, base_level: 22,
+        hp_mult: 14.0, atk_mult: 5.5, def_mult: 4.5,
+        modifiers: &[EnemyModifier::Shielded, EnemyModifier::Reflector, EnemyModifier::Regenerator],
+        phase_thresholds: &[0.70, 0.40],
+        summon_count: 4,
+    },
+    WorldBossDef {
+        id: "necro_lord", name: "Malachar", title: "the Necro Lord",
+        spawn_x: -95.0, spawn_y: -45.0, base_level: 28,
+        hp_mult: 16.0, atk_mult: 6.5, def_mult: 3.5,
+        modifiers: &[EnemyModifier::Summoner, EnemyModifier::Vampiric, EnemyModifier::Undying, EnemyModifier::Poisonous],
+        phase_thresholds: &[0.80, 0.60, 0.40, 0.20],
+        summon_count: 8,
+    },
+    WorldBossDef {
+        id: "storm_dragon", name: "Voltharion", title: "the Storm Dragon",
+        spawn_x: 130.0, spawn_y: 10.0, base_level: 35,
+        hp_mult: 22.0, atk_mult: 8.0, def_mult: 5.0,
+        modifiers: &[EnemyModifier::Swift, EnemyModifier::Burning, EnemyModifier::Explosive, EnemyModifier::Enraged],
+        phase_thresholds: &[0.75, 0.50, 0.25, 0.10],
+        summon_count: 5,
+    },
+    WorldBossDef {
+        id: "abyssal_horror", name: "Xal'Theron", title: "the Abyssal Horror",
+        spawn_x: 105.0, spawn_y: -95.0, base_level: 40,
+        hp_mult: 25.0, atk_mult: 9.0, def_mult: 6.0,
+        modifiers: &[EnemyModifier::Draining, EnemyModifier::Teleporter, EnemyModifier::Berserker, EnemyModifier::Shielded, EnemyModifier::Poisonous],
+        phase_thresholds: &[0.80, 0.60, 0.40, 0.20, 0.05],
+        summon_count: 7,
+    },
+    WorldBossDef {
+        id: "plague_titan", name: "Pestilux", title: "the Plague Titan",
+        spawn_x: -50.0, spawn_y: -130.0, base_level: 35,
+        hp_mult: 20.0, atk_mult: 7.0, def_mult: 4.0,
+        modifiers: &[EnemyModifier::Poisonous, EnemyModifier::Regenerator, EnemyModifier::Summoner, EnemyModifier::Explosive],
+        phase_thresholds: &[0.75, 0.50, 0.25],
+        summon_count: 6,
+    },
+    WorldBossDef {
+        id: "sand_emperor", name: "Kha'Zarak", title: "the Sand Emperor",
+        spawn_x: 140.0, spawn_y: 80.0, base_level: 32,
+        hp_mult: 18.0, atk_mult: 6.0, def_mult: 5.5,
+        modifiers: &[EnemyModifier::Armored, EnemyModifier::Swift, EnemyModifier::Burning, EnemyModifier::Reflector],
+        phase_thresholds: &[0.70, 0.40, 0.10],
+        summon_count: 5,
+    },
+    WorldBossDef {
+        id: "moon_dragon", name: "Lunaris", title: "the Moon Dragon",
+        spawn_x: -120.0, spawn_y: 110.0, base_level: 38,
+        hp_mult: 24.0, atk_mult: 8.5, def_mult: 5.5,
+        modifiers: &[EnemyModifier::Freezing, EnemyModifier::Teleporter, EnemyModifier::Shielded, EnemyModifier::Swift],
+        phase_thresholds: &[0.80, 0.55, 0.30, 0.10],
+        summon_count: 6,
+    },
+    WorldBossDef {
+        id: "demon_king", name: "Azmodan", title: "the Demon King",
+        spawn_x: 0.0, spawn_y: 150.0, base_level: 45,
+        hp_mult: 30.0, atk_mult: 10.0, def_mult: 7.0,
+        modifiers: &[EnemyModifier::Burning, EnemyModifier::Vampiric, EnemyModifier::Berserker, EnemyModifier::Explosive, EnemyModifier::Enraged, EnemyModifier::Undying],
+        phase_thresholds: &[0.90, 0.75, 0.50, 0.25, 0.10, 0.05],
+        summon_count: 10,
+    },
+    WorldBossDef {
+        id: "world_serpent", name: "Jormungandr", title: "the World Serpent",
+        spawn_x: -140.0, spawn_y: -110.0, base_level: 50,
+        hp_mult: 35.0, atk_mult: 12.0, def_mult: 8.0,
+        modifiers: &[EnemyModifier::Poisonous, EnemyModifier::Swift, EnemyModifier::Draining, EnemyModifier::Berserker, EnemyModifier::Armored, EnemyModifier::Regenerator],
+        phase_thresholds: &[0.90, 0.80, 0.60, 0.40, 0.20, 0.05],
+        summon_count: 12,
+    },
+    // === Endgame Raid Bosses ===
+    WorldBossDef {
+        id: "celestial_arbiter", name: "Aethon", title: "the Celestial Arbiter",
+        spawn_x: 135.0, spawn_y: 105.0, base_level: 50,
+        hp_mult: 40.0, atk_mult: 14.0, def_mult: 10.0,
+        modifiers: &[EnemyModifier::Shielded, EnemyModifier::Swift, EnemyModifier::Draining, EnemyModifier::Berserker, EnemyModifier::Reflector, EnemyModifier::Regenerator],
+        phase_thresholds: &[0.85, 0.70, 0.50, 0.30, 0.15, 0.05],
+        summon_count: 15,
+    },
+    WorldBossDef {
+        id: "ash_titan", name: "Pyrotharax", title: "the Ash Titan",
+        spawn_x: 145.0, spawn_y: -55.0, base_level: 48,
+        hp_mult: 32.0, atk_mult: 16.0, def_mult: 7.0,
+        modifiers: &[EnemyModifier::Burning, EnemyModifier::Explosive, EnemyModifier::Berserker, EnemyModifier::Thorns, EnemyModifier::Armored],
+        phase_thresholds: &[0.80, 0.60, 0.40, 0.20, 0.05],
+        summon_count: 10,
+    },
+    WorldBossDef {
+        id: "void_emperor", name: "Nul'Gathoth", title: "the Void Emperor",
+        spawn_x: 0.0, spawn_y: -140.0, base_level: 50,
+        hp_mult: 45.0, atk_mult: 13.0, def_mult: 9.0,
+        modifiers: &[EnemyModifier::Draining, EnemyModifier::Shielded, EnemyModifier::Swift, EnemyModifier::Poisonous, EnemyModifier::Berserker, EnemyModifier::Vampiric, EnemyModifier::Reflector],
+        phase_thresholds: &[0.90, 0.75, 0.60, 0.45, 0.30, 0.15, 0.05],
+        summon_count: 18,
+    },
+    WorldBossDef {
+        id: "twilight_queen", name: "Morvaine", title: "the Twilight Queen",
+        spawn_x: -145.0, spawn_y: -75.0, base_level: 47,
+        hp_mult: 28.0, atk_mult: 15.0, def_mult: 6.0,
+        modifiers: &[EnemyModifier::Vampiric, EnemyModifier::Swift, EnemyModifier::Poisonous, EnemyModifier::Draining, EnemyModifier::Regenerator],
+        phase_thresholds: &[0.80, 0.60, 0.40, 0.20, 0.05],
+        summon_count: 12,
+    },
+    WorldBossDef {
+        id: "storm_warden", name: "Zephyrion", title: "the Storm Warden",
+        spawn_x: 85.0, spawn_y: 105.0, base_level: 45,
+        hp_mult: 25.0, atk_mult: 18.0, def_mult: 5.0,
+        modifiers: &[EnemyModifier::Swift, EnemyModifier::Berserker, EnemyModifier::Explosive, EnemyModifier::Thorns],
+        phase_thresholds: &[0.75, 0.50, 0.25, 0.05],
+        summon_count: 8,
     },
 ];
 
@@ -1647,6 +2401,22 @@ pub static ITEM_SETS: &[ItemSetDef] = &[
         pieces: &["Void Mask", "Void Cuirass", "Void Tassets", "Void Boots", "Void Aegis"],
         bonuses: &[(2, "ATK", 20), (3, "DEF", 20), (4, "HP", 150), (5, "ATK", 40)],
     },
+    // === New Endgame Sets ===
+    ItemSetDef {
+        id: "ashfall_set", name: "Ashfall Forgemaster", icon: "🌋",
+        pieces: &["Magma Core", "Obsidian Plate", "Cinder Heart", "Pyroclast Helm", "Ashfall Greaves"],
+        bonuses: &[(2, "ATK", 25), (3, "DEF", 15), (4, "HP", 200), (5, "ATK", 50)],
+    },
+    ItemSetDef {
+        id: "twilight_set", name: "Twilight Phantom", icon: "🌙",
+        pieces: &["Umbral", "Shadowweave", "Veil of Twilight", "Nightshade", "Phantom"],
+        bonuses: &[(2, "SPD", 15), (3, "LCK", 20), (4, "ATK", 30), (5, "SPD", 25)],
+    },
+    ItemSetDef {
+        id: "celestial_set", name: "Celestial Ascendant", icon: "⭐",
+        pieces: &["Starforged", "Astral Vestments", "Crown of Constellations", "Celestial Wings", "Star Ring"],
+        bonuses: &[(2, "MP", 80), (3, "ATK", 35), (4, "HP", 250), (5, "MP", 120)],
+    },
 ];
 
 /// Check how many pieces of each set a player has equipped, return active set bonuses
@@ -1699,6 +2469,47 @@ pub const CONSUMABLE_TYPES: &[(&str, &str, &str, &str, i32)] = &[
     ("Cooked Meat",        "🍖",  "regen_hp",  "HP",  10),
     ("Feast Plate",        "🍽️", "regen_both", "HP",  15),
     ("Golden Apple",       "🍎",  "regen_both", "HP",  25),
+    // Mount items (long-duration speed buffs)
+    ("Riding Horse Whistle", "🐴", "mount_speed", "SPD", 30),
+    ("War Horse Whistle",    "🏇", "mount_speed", "SPD", 50),
+    ("Griffin Feather",      "🦅", "mount_speed", "SPD", 70),
+    ("Dragon Saddle",        "🐲", "mount_speed", "SPD", 100),
+    // Combat consumables
+    ("Smoke Bomb",           "💨", "escape",      "",    0),
+    ("War Horn",             "📯", "buff_all",    "ATK", 10),
+    ("Berserker Draught",    "🫗", "buff_atk",    "ATK", 30),
+    ("Diamond Skin Potion",  "🛡️", "buff_def",   "DEF", 30),
+    ("XP Scroll",            "📜", "buff_xp",     "XP",  50),
+    ("Gold Scroll",          "📜", "buff_gold",   "GOLD", 50),
+    // Rare utility
+    ("Recall Stone",         "🔮", "town_recall", "",    0),
+    ("Resurrection Scroll",  "📜", "self_res",    "",    0),
+    // Advanced Potions
+    ("Supreme Mana Potion",  "💎", "instant_mana", "MP", 300),
+    ("Full Restore Elixir",  "🌟", "full_restore", "HP", 9999),
+    ("Antidote",             "🧴", "cure_poison",  "",   0),
+    ("Fire Resistance Potion","🔥", "buff_fire_res","DEF", 20),
+    ("Ice Resistance Potion", "❄️", "buff_ice_res", "DEF", 20),
+    // Advanced Buffs
+    ("Titan's Brew",         "🫗", "buff_all",     "ATK", 25),
+    ("Arcane Intellect Scroll","📜","buff_mp",     "MP",  50),
+    ("Experience Tome",      "📕", "buff_xp",      "XP",  100),
+    ("Luck Charm",           "🎲", "buff_lck",     "LCK", 40),
+    ("Shield of Faith Scroll","📜", "buff_def",    "DEF", 25),
+    // Party Items
+    ("Group Heal Scroll",    "📜", "party_heal",   "HP",  100),
+    ("War Drums",            "🥁", "party_buff",   "ATK", 15),
+    ("Banner of Courage",    "🚩", "party_buff",   "DEF", 15),
+    // Endgame Consumables
+    ("Celestial Nectar",     "✨", "heal_over_time","HP",  200),
+    ("Void Essence Flask",   "🕳️", "buff_all",     "ATK", 40),
+    ("Phoenix Down",         "🔥", "revive",       "HP",  500),
+    ("Elixir of Immortality","⭐", "invuln",       "HP",  0),
+    ("Stamina Potion",       "⚡", "restore_stam", "",    120),
+    ("Rune of Return",       "🏠", "teleport_town","",    0),
+    ("Smoke Bomb",           "💨", "escape_combat","",    0),
+    ("Whetstone",            "🪨", "buff_atk",     "ATK", 15),
+    ("Enchanted Scroll",     "📜", "random_buff",  "",    0),
 ];
 
 // ─── Fishing Loot Table ───────────────────────────────────────
@@ -1732,6 +2543,12 @@ pub const FISHING_LOOT: &[(&str, &str, u8, u32, u32, u64, &str)] = &[
     ("Pearl",               "🫧", 1, 10, 5,  40,  ""),
     ("Fish Bone",           "🦴", 0, 5,  8,  10,  ""),
     ("Enchanted Scale",     "✨", 2, 20, 2,  120, ""),
+    // Rare endgame fishing
+    ("Abyssal Anglerfish",  "🐟", 4, 30, 1,  800, "ATK"),
+    ("Celestial Koi",       "🎏", 5, 35, 1,  1200,"MP"),
+    ("Void Eel",            "🐍", 4, 28, 1,  600, "SPD"),
+    ("Phoenix Carp",        "🔥", 5, 40, 1,  1500,"HP"),
+    ("Ancient Treasure Chest","🎁", 3, 25, 1, 2000,""),
 ];
 
 /// Pick a random fishing catch based on zone level and luck
@@ -1774,6 +2591,30 @@ pub fn roll_fishing_catch(zone_level: u32, luck: i32) -> (&'static str, &'static
     let last = eligible.last().unwrap();
     (last.0, last.1, last.2, last.5, last.6)
 }
+
+// ─── Mining / Gathering Nodes ────────────────────────────────
+// (node_type, icon, rarity, min_level, resource_name, base_yield)
+pub const MINING_NODES: &[(&str, &str, u8, u32, &str, u32)] = &[
+    ("copper_vein",    "🪨", 0, 1,  "Copper Ore",    3),
+    ("iron_deposit",   "⛏️", 0, 3,  "Iron Ore",      2),
+    ("silver_vein",    "🥈", 1, 8,  "Silver Ore",    2),
+    ("gold_vein",      "🥇", 2, 15, "Gold Ore",      1),
+    ("mithril_deposit","💠", 2, 20, "Mithril Ore",   1),
+    ("adamantite_vein","💎", 3, 25, "Adamantite Ore", 1),
+    ("herb_patch",     "🌿", 0, 1,  "Herb",          3),
+    ("silk_bloom",     "🌸", 1, 10, "Silk",          2),
+    ("gem_cluster",    "💎", 2, 15, "Gem Shard",     1),
+    ("crystal_node",   "🔮", 3, 20, "Star Fragment", 1),
+    ("soul_wellspring","👻", 4, 30, "Soul Fragment", 1),
+    ("celestial_bloom","✨", 3, 25, "Celestial Dust", 1),
+    ("dragon_fossil",  "🦴", 4, 30, "Dragon Scale",  1),
+    ("primordial_core_node","🌀", 5, 35, "Primordial Core", 1),
+    // Endgame gathering nodes
+    ("obsidian_vein",  "🌑", 4, 30, "Obsidian Shard",    1),
+    ("phoenix_nest",   "🔥", 5, 35, "Phoenix Ash",       1),
+    ("void_fissure",   "🕳️", 5, 40, "Void Shard",        1),
+    ("astral_crystal",  "⭐", 5, 40, "Star Fragment",     2),
+];
 
 // ─── Faction / Reputation System ──────────────────────────────
 // (faction_id, name, icon, description)
@@ -1844,3 +2685,209 @@ pub const DAILY_REWARDS: &[(u32, &str, u32, u64)] = &[
     (28, "Golden Apple",        3,  2000),  // Monthly bonus
     (30, "Feast Plate",         5,  3000),  // Month-end mega bonus
 ];
+
+// ─── Legendary Unique Items ──────────────────────────────────
+// (name, slot, stat_key, stat_val, rarity, level, special_desc)
+pub const LEGENDARY_UNIQUES: &[(&str, &str, &str, i32, u8, u32, &str)] = &[
+    ("Ignaroth's Fang",       "weapon",  "ATK", 35, 4, 15, "Burns enemies on hit"),
+    ("Frostbite Crown",       "head",    "DEF", 25, 4, 20, "Slows attackers"),
+    ("Shadow King's Mantle",  "cape",    "LCK", 20, 4, 25, "Increased crit chance"),
+    ("Terragor's Heart",      "amulet",  "HP",  80, 4, 18, "Massive HP boost"),
+    ("Nihilax Voidfang",      "weapon",  "ATK", 42, 5, 30, "Drains enemy life"),
+    ("Crystal Queen's Scepter","weapon", "ATK", 38, 4, 22, "Chance to stun"),
+    ("Malachar's Grimoire",   "offhand", "MP",  50, 4, 28, "Increases spell power"),
+    ("Voltharion's Talon",    "weapon",  "ATK", 48, 5, 35, "Chain lightning on hit"),
+    ("Abyssal Dread Plate",   "armor",   "DEF", 40, 5, 40, "Reduces all damage taken"),
+    ("Eye of Xal'Theron",     "ring",    "LCK", 25, 5, 40, "See hidden enemies"),
+    ("Dragonfire Gauntlets",  "gloves",  "ATK", 22, 3, 15, "Fire damage bonus"),
+    ("Boots of the Wind",     "boots",   "SPD", 18, 3, 12, "Increased movement speed"),
+    ("Ring of Endless Gold",  "ring",    "LCK", 15, 3, 10, "Increased gold drops"),
+    ("Amulet of Resurrection","amulet",  "HP",  50, 4, 20, "Auto-revive once per hour"),
+    ("Blade of a Thousand Cuts","weapon","ATK", 30, 4, 18, "Multi-hit chance"),
+    ("Shield of the Ancients","shield",  "DEF", 35, 4, 22, "Reflects 10% damage"),
+    ("Crown of the Conqueror","head",    "ATK", 18, 5, 35, "All stats +5"),
+    ("Celestial Wings",       "cape",    "SPD", 15, 5, 30, "Fly over obstacles"),
+    ("Soul Harvester",        "weapon",  "ATK", 55, 5, 40, "Heals on kill"),
+    ("Eternal Flame Ring",    "ring",    "ATK", 20, 4, 25, "Burns nearby enemies"),
+    // Phase 10 legendaries
+    ("Frostmourne",           "weapon",  "ATK", 60, 5, 45, "Freezes on critical hit"),
+    ("Staff of the Archmage", "weapon",  "ATK", 45, 5, 35, "Doubles spell damage"),
+    ("Assassin's Mark",       "ring",    "LCK", 30, 5, 40, "Triple backstab damage"),
+    ("Titan's Grasp",         "gloves",  "ATK", 28, 4, 30, "Crushing blows stun"),
+    ("Leviathan Scale",       "armor",   "DEF", 50, 5, 45, "Immune to knockback"),
+    ("Phoenix Plume",         "cape",    "HP",  60, 5, 35, "Auto-revive with 50% HP"),
+    ("Thundergod's Helm",     "head",    "DEF", 30, 4, 28, "Lightning strikes attackers"),
+    ("Voidwalker Boots",      "boots",   "SPD", 22, 5, 35, "Phase through enemies"),
+    ("Band of the Infinite",  "ring",    "MP",  40, 5, 40, "Unlimited mana for 5s on kill"),
+    ("Warbringer's Plate",    "armor",   "DEF", 45, 4, 32, "Thorns damage +25%"),
+    // Phase 11 legendaries — class-specific
+    ("Excalibur",              "weapon",  "ATK", 65, 5, 50, "Holy damage ignores all defense"),
+    ("Shadowfang",             "weapon",  "ATK", 50, 5, 40, "Poisons target on every hit"),
+    ("Stormbreaker",           "weapon",  "ATK", 58, 5, 45, "Chain lightning on crit"),
+    ("Lunar Eclipse",          "weapon",  "ATK", 52, 5, 38, "Chance to blind target"),
+    ("Crown of Ages",          "head",    "DEF", 40, 5, 45, "All resistances +50%"),
+    ("Heart of the Mountain",  "amulet",  "HP",  100, 5, 50, "Cannot be one-shot"),
+    ("Infinity Band",          "ring",    "MP",  50, 5, 45, "Skills cost 30% less mana"),
+    ("Enigma Plate",           "armor",   "DEF", 55, 5, 50, "Teleport on dodge"),
+    ("Windforce Longbow",      "weapon",  "ATK", 48, 5, 42, "Knockback on every hit"),
+    ("Grief Blade",            "weapon",  "ATK", 70, 5, 50, "Ignores target defense"),
+    ("Chains of Honor",        "armor",   "DEF", 48, 5, 45, "+5 all stats, leech life"),
+    ("Harlequin Crest",        "head",    "DEF", 35, 5, 40, "+2 all skills, magic find"),
+    ("War Traveler Boots",     "boots",   "SPD", 25, 4, 35, "+50% gold find"),
+    ("Chance Guards",          "gloves",  "LCK", 22, 3, 30, "+200% magic find"),
+    ("Godly Amulet of Kings",  "amulet",  "ATK", 25, 5, 45, "+All stats, lifesteal 3%"),
+    // === Celestial Legendaries ===
+    ("Astral Annihilator",     "weapon",  "ATK", 72, 5, 48, "Star damage that pierces all defenses"),
+    ("Cosmic Bulwark",         "armor",   "DEF", 60, 5, 50, "Absorbs 25% damage as mana"),
+    ("Nebula Circlet",         "head",    "MP",  70, 5, 45, "Spells echo with 30% power"),
+    ("Void Siphon Ring",       "ring",    "HP",  60, 5, 42, "Drains 5% max HP from enemies"),
+    ("Ethereal Mantle",        "cape",    "SPD", 30, 5, 40, "Phase through enemies briefly"),
+    // === Volcanic Legendaries ===
+    ("Inferno's Wrath",        "weapon",  "ATK", 68, 5, 46, "Eruption AoE on every 5th hit"),
+    ("Magma Heart Shield",     "shield",  "DEF", 55, 5, 44, "Thorns fire damage to attackers"),
+    ("Pyroclast Gauntlets",    "gloves",  "ATK", 30, 4, 38, "Attacks leave burning ground"),
+    // === Twilight Legendaries ===
+    ("Morvaine's Embrace",     "armor",   "DEF", 50, 5, 47, "Lifesteal 8% of all damage"),
+    ("Duskbringer",            "weapon",  "ATK", 62, 5, 44, "Critical hits cause fear"),
+    ("Shadow Crown",           "head",    "LCK", 35, 5, 42, "20% chance to evade all damage"),
+    // === Crafted Legendaries ===
+    ("Adamantite Destroyer",   "weapon",  "ATK", 58, 5, 40, "Armor penetration +50%"),
+    ("Phoenix Feather Robe",   "armor",   "HP",  80, 5, 38, "Auto-revive once per battle"),
+    ("Dragon Scale Aegis",     "shield",  "DEF", 65, 5, 50, "Elemental damage immunity"),
+];
+
+/// Rune recipes: (rune_name, required_material_template_id, min_magic_level(max_mp), mana_cost)
+pub const RUNE_RECIPES: &[(&str, &str, u32, u32)] = &[
+    ("Rune of Healing",       "blank_rune", 10, 20),
+    ("Rune of Fire",          "blank_rune", 15, 30),
+    ("Rune of Ice",           "blank_rune", 15, 30),
+    ("Rune of Lightning",     "blank_rune", 20, 40),
+    ("Rune of Great Healing", "blank_rune", 25, 50),
+    ("Rune of Sudden Death",  "blank_rune", 35, 80),
+    ("Rune of Explosion",     "blank_rune", 30, 60),
+    ("Rune of Paralyze",      "blank_rune", 40, 100),
+    ("Rune of Wall of Fire",  "blank_rune", 20, 40),
+    ("Rune of Magic Shield",  "blank_rune", 30, 60),
+];
+
+/// Dungeon-specific loot tables: (dungeon_name, item_name, slot, stat, stat_val, rarity, level, description, drop_chance)
+pub const DUNGEON_LOOT: &[(&str, &str, &str, &str, i32, u8, u32, &str, f64)] = &[
+    // Goblin Warren (level 5+)
+    ("Goblin Warren", "Goblin King's Crown",     "head",   "LCK", 12,  3, 8,  "Glows with stolen treasure",     0.08),
+    ("Goblin Warren", "Sharpened Shiv",           "weapon", "ATK", 15,  2, 6,  "Quick, dirty, effective",        0.15),
+    ("Goblin Warren", "Bag of Goblin Gold",       "ring",   "LCK", 8,   2, 5,  "+10% gold from kills",          0.12),
+    // Frozen Crypt (level 8+)
+    ("Frozen Crypt",  "Permafrost Blade",         "weapon", "ATK", 22,  3, 12, "Freezes enemies on crit",       0.07),
+    ("Frozen Crypt",  "Crypt Warden's Shield",    "shield", "DEF", 20,  3, 10, "Blocks ice damage",             0.10),
+    ("Frozen Crypt",  "Frozen Heart Amulet",      "amulet", "HP",  40,  3, 11, "Slows attacker on hit",         0.08),
+    // Shadow Dungeon (level 10+)
+    ("Shadow Dungeon","Shadowmeld Cloak",         "cape",   "SPD", 14,  3, 14, "Stealth for 3 seconds",         0.06),
+    ("Shadow Dungeon","Dagger of Shadows",        "weapon", "ATK", 28,  4, 15, "Backstab deals 2x damage",      0.05),
+    ("Shadow Dungeon","Shadow Bindings",          "gloves", "ATK", 12,  3, 13, "Drain life on hit",             0.08),
+    // Stone Mines (level 7+)
+    ("Stone Mines",   "Pickaxe of the Depths",    "weapon", "ATK", 20,  2, 9,  "+25% mining XP",                0.12),
+    ("Stone Mines",   "Earthen Plate",            "armor",  "DEF", 18,  3, 10, "Immune to knockback",           0.09),
+    ("Stone Mines",   "Gem-Encrusted Ring",       "ring",   "LCK", 14,  3, 8,  "Chance to find rare gems",      0.10),
+    // Void Rift (level 15+)
+    ("Void Rift",     "Void Shard Blade",         "weapon", "ATK", 38,  4, 20, "Ignores 30% defense",           0.04),
+    ("Void Rift",     "Rift Walker Boots",        "boots",  "SPD", 16,  4, 18, "Teleport short distance",       0.05),
+    ("Void Rift",     "Void Barrier",             "shield", "DEF", 30,  4, 19, "Absorbs void damage",           0.04),
+    // Dragon's Lair (level 12+)
+    ("Dragon's Lair", "Dragonscale Mail",         "armor",  "DEF", 32,  4, 16, "Fire resistance +50%",          0.05),
+    ("Dragon's Lair", "Dragon Fang Dagger",       "weapon", "ATK", 34,  4, 15, "Pierces through armor",         0.06),
+    ("Dragon's Lair", "Dragon's Eye",             "ring",   "ATK", 15,  3, 14, "See hidden enemies",            0.08),
+    // Necropolis (level 9+)
+    ("Necropolis",    "Bonecrusher Mace",         "weapon", "ATK", 24,  3, 12, "Shatters undead easily",        0.08),
+    ("Necropolis",    "Lich Phylactery",          "amulet", "MP",  35,  4, 14, "Revive once when killed",       0.04),
+    ("Necropolis",    "Death Knight's Helm",      "head",   "DEF", 22,  3, 11, "Fear resistance",               0.07),
+    // Infernal Pit (level 11+)
+    ("Infernal Pit",  "Infernal Greatsword",      "weapon", "ATK", 30,  3, 14, "Burns enemies over time",       0.06),
+    ("Infernal Pit",  "Molten Shield",            "shield", "DEF", 25,  3, 13, "Reflects fire damage",          0.07),
+    ("Infernal Pit",  "Hellfire Ring",            "ring",   "ATK", 18,  4, 15, "AoE fire burst on crit",        0.05),
+    // Crystal Caverns (level 6+)
+    ("Crystal Caverns","Crystal Staff",           "weapon", "ATK", 18,  3, 9,  "Amplifies magic by 15%",        0.08),
+    ("Crystal Caverns","Prism Shield",            "shield", "DEF", 16,  2, 7,  "Reflects projectiles",          0.10),
+    ("Crystal Caverns","Crystal Pendant",         "amulet", "LCK", 10,  2, 7,  "Reveals hidden paths",          0.12),
+    // Abyssal Depths (level 18+)
+    ("Abyssal Depths","Leviathan's Trident",      "weapon", "ATK", 45,  5, 22, "Summons water tendrils",        0.03),
+    ("Abyssal Depths","Abyssal Plate",            "armor",  "DEF", 38,  5, 20, "Immune to drowning effects",    0.03),
+    ("Abyssal Depths","Eye of the Deep",          "amulet", "HP",  65,  5, 21, "See in complete darkness",      0.04),
+    // Sunken Temple (level 13+)
+    ("Sunken Temple", "Tidecaller's Staff",       "weapon", "ATK", 32,  3, 16, "Summons tidal waves",           0.06),
+    ("Sunken Temple", "Coral Armor",              "armor",  "DEF", 28,  3, 15, "Regenerate HP in water zones",  0.07),
+    ("Sunken Temple", "Pearl of Wisdom",          "amulet", "MP",  40,  3, 14, "+20% XP from quests",           0.08),
+    // Volcanic Forge (level 16+)
+    ("Volcanic Forge","Magma Blade",              "weapon", "ATK", 40,  4, 19, "Melts armor on crit",           0.05),
+    ("Volcanic Forge","Obsidian Plate",           "armor",  "DEF", 35,  4, 18, "Immune to fire damage",         0.05),
+    ("Volcanic Forge","Forge Master's Hammer",    "weapon", "ATK", 36,  4, 17, "+30% crafting success rate",    0.06),
+    // Frostbite Cavern (level 14+)
+    ("Frostbite Cavern","Glacial Greatsword",     "weapon", "ATK", 35,  4, 17, "Slows enemies by 40%",         0.06),
+    ("Frostbite Cavern","Frostbite Gauntlets",    "gloves", "DEF", 18,  3, 15, "Freeze attacker on block",     0.07),
+    ("Frostbite Cavern","Ice Queen's Tiara",      "head",   "MP",  30,  4, 16, "Ice spells cost 20% less",     0.05),
+    // Demon's Throne (level 20+)
+    ("Demon's Throne","Demon Lord's Glaive",      "weapon", "ATK", 52,  5, 24, "Life steal on every hit",      0.03),
+    ("Demon's Throne","Hellforged Plate",         "armor",  "DEF", 45,  5, 23, "Thorns damage to attackers",   0.03),
+    ("Demon's Throne","Soul Gem",                 "ring",   "HP",  80,  5, 22, "Absorbs souls for power",      0.03),
+    // Sky Citadel (level 17+)
+    ("Sky Citadel",   "Thunderbolt Javelin",      "weapon", "ATK", 42,  4, 20, "Chain lightning on hit",       0.05),
+    ("Sky Citadel",   "Stormcloud Mantle",        "cape",   "SPD", 18,  4, 19, "Dodge chance +15%",            0.05),
+    ("Sky Citadel",   "Wings of the Archon",      "boots",  "SPD", 20,  5, 21, "Brief flight on dodge",        0.03),
+    // Ashfall Furnace (level 22+)
+    ("Ashfall Furnace","Magma Core Hammer",       "weapon", "ATK", 55,  5, 26, "Eruption on critical hit",     0.03),
+    ("Ashfall Furnace","Obsidian Plate Mail",     "armor",  "DEF", 48,  5, 25, "Fire immunity, thorns damage", 0.03),
+    ("Ashfall Furnace","Cinder Heart Amulet",     "amulet", "HP", 100,  5, 24, "Revive once per hour",         0.02),
+    // Twilight Sanctum (level 19+)
+    ("Twilight Sanctum","Umbral Dagger",          "weapon", "ATK", 40,  4, 22, "Strikes from shadows",         0.04),
+    ("Twilight Sanctum","Shadowweave Robe",       "armor",  "MP",  50,  4, 21, "Dark magic amplified",         0.04),
+    ("Twilight Sanctum","Veil of Twilight",       "head",   "LCK", 20,  5, 22, "Become invisible briefly",     0.03),
+    // Celestial Spire (level 25+ — hardest dungeon)
+    ("Celestial Spire","Starforged Blade",        "weapon", "ATK", 65,  5, 30, "Holy damage ignores armor",    0.02),
+    ("Celestial Spire","Astral Vestments",        "armor",  "DEF", 55,  5, 28, "Celestial shield on low HP",   0.02),
+    ("Celestial Spire","Crown of Constellations", "head",   "MP", 120,  5, 30, "All skills cost 30% less",     0.01),
+];
+
+// ─── Mount Data ──────────────────────────────────────────────
+// (item_name, mount_name, speed_bonus, emoji)
+pub const MOUNT_DATA: &[(&str, &str, f64, &str)] = &[
+    ("Riding Horse Whistle", "Riding Horse",   0.30, "🐴"),
+    ("War Horse Whistle",    "War Horse",      0.50, "🏇"),
+    ("Griffin Feather",      "Griffin",        0.70, "🦅"),
+    ("Dragon Saddle",        "Dragon",         1.00, "🐲"),
+];
+
+// ─── Daily Quest Templates ───────────────────────────────────
+// (title, description, objective_type, target_count, reward_xp, reward_gold)
+pub const DAILY_QUEST_TEMPLATES: &[(&str, &str, &str, u32, u64, u64)] = &[
+    ("Monster Hunter",       "Defeat 10 enemies",             "kill_enemies",    10,  200,  50),
+    ("Slaughter Spree",      "Defeat 25 enemies",             "kill_enemies",    25,  500,  120),
+    ("Boss Slayer",          "Defeat a boss-rank enemy",       "kill_boss",       1,   600,  200),
+    ("Gatherer's Duty",      "Mine 5 ore nodes",              "mine_nodes",      5,   150,  40),
+    ("Angler's Task",        "Catch 3 fish",                  "catch_fish",      3,   150,  40),
+    ("Master Angler",        "Catch 8 fish",                  "catch_fish",      8,   400,  100),
+    ("Craftsman's Work",     "Craft 3 items",                 "craft_items",     3,   200,  60),
+    ("Gold Rush",            "Earn 500 gold",                 "earn_gold",       500, 300,  0),
+    ("Dungeon Delver",       "Clear any dungeon zone",         "enter_dungeon",   1,   500,  150),
+    ("Social Butterfly",     "Send a message in chat",         "send_chat",       1,   50,   20),
+    ("Market Mogul",         "List an item on the auction",    "auction_list",    1,   100,  30),
+    ("Enchanter's Task",     "Enchant an item",               "enchant_item",    1,   200,  50),
+    ("Explorer's Journey",   "Visit 3 different towns",        "visit_towns",     3,   400,  80),
+    ("Party Player",         "Join or create a party",         "join_party",      1,   150,  30),
+    ("Combo Master",         "Reach a 15-hit combo",           "combo_hits",      15,  300,  60),
+];
+
+impl DailyQuest {
+    pub fn from_template(idx: usize) -> Self {
+        let t = DAILY_QUEST_TEMPLATES[idx];
+        DailyQuest {
+            quest_id: format!("daily-{}", idx),
+            title: t.0.to_string(),
+            description: t.1.to_string(),
+            objective: t.2.to_string(),
+            target: t.3,
+            progress: 0,
+            completed: false,
+            reward_xp: t.4,
+            reward_gold: t.5,
+        }
+    }
+}

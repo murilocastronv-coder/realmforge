@@ -1,7 +1,7 @@
 import { useComputed, useSignal } from '@preact/signals';
-import { openPanels, togglePanel, playerStats } from '../../store/GameStore';
+import { openPanels, togglePanel, playerStats, getNetwork } from '../../store/GameStore';
 import { PanelShell } from '../components/PanelShell';
-import { WebSocketClient, MessageType } from '../../network/WebSocketClient';
+import { MessageType } from '../../network/WebSocketClient';
 
 interface SkillNode {
   id: string;
@@ -37,7 +37,7 @@ export function SkillTreePanel() {
   if (!isOpen.value) return null;
 
   // Request skill tree data on open
-  const ws = WebSocketClient.getInstance();
+  const ws = getNetwork();
   if (ws) {
     ws.send(MessageType.SkillTreeRequest, {});
   }

@@ -6,6 +6,7 @@ import { getSettings } from './panels/SettingsPanel';
 import { LoginScreen } from './screens/LoginScreen';
 import { LoadingScreen } from './screens/LoadingScreen';
 import { DeathOverlay } from './overlays/DeathOverlay';
+import { WeatherOverlay } from './overlays/WeatherOverlay';
 import { TutorialOverlay } from './overlays/TutorialOverlay';
 import { StatsBar } from './hud/StatsBar';
 import { BuffBar } from './hud/BuffBar';
@@ -14,6 +15,7 @@ import { QuestTracker } from './hud/QuestTracker';
 import { EntityTooltip } from './hud/EntityTooltip';
 import { ContextMenu } from './hud/ContextMenu';
 import { WorldEventBanner } from './hud/WorldEventBanner';
+import { ActiveWorldEventBar } from './hud/ActiveWorldEventBar';
 import { ToastStack } from './hud/ToastStack';
 import { PartyHUD, PartyInviteToast } from './hud/PartyHUD';
 import { EmoteWheel } from './hud/EmoteWheel';
@@ -40,6 +42,18 @@ import { TradePanel } from './panels/TradePanel';
 import { SkillTreePanel } from './panels/SkillTreePanel';
 import { GuildPanel } from './panels/GuildPanel';
 import { EnchantPanel } from './panels/EnchantPanel';
+import { FishingPanel } from './panels/FishingPanel';
+import { FactionPanel } from './panels/FactionPanel';
+import { MiningPanel } from './panels/MiningPanel';
+import { PetPanel } from './panels/PetPanel';
+import { MailPanel } from './panels/MailPanel';
+import { ArenaPanel } from './panels/ArenaPanel';
+import { DailyQuestPanel } from './panels/DailyQuestPanel';
+import { DungeonFinderPanel } from './panels/DungeonFinderPanel';
+import { BestiaryPanel } from './panels/BestiaryPanel';
+import { BlessingPanel } from './panels/BlessingPanel';
+import { BountyPanel } from './panels/BountyPanel';
+import { RuneCraftPanel } from './panels/RuneCraftPanel';
 import { StatAllocationModal } from './modals/StatAllocationModal';
 
 /**
@@ -85,6 +99,7 @@ export function App() {
       <EntityTooltip />
       <ItemTooltipOverlay />
       <WorldEventBanner />
+      <ActiveWorldEventBar />
       <ContextMenu />
       <EmoteWheel />
       <AchievementToast />
@@ -107,14 +122,27 @@ export function App() {
       <SkillTreePanel />
       <GuildPanel />
       <EnchantPanel />
+      <FishingPanel />
+      <FactionPanel />
+      <MiningPanel />
+      <PetPanel />
       <InspectPanel />
       <TradePanel />
+      <MailPanel />
+      <ArenaPanel />
+      <DailyQuestPanel />
+      <DungeonFinderPanel />
+      <BestiaryPanel />
+      <BlessingPanel />
+      <BountyPanel />
+      <RuneCraftPanel />
 
       {/* Modals & Overlays */}
       <PartyInviteToast />
       {statAlloc.value && <StatAllocationModal />}
       {tutorial.value && <TutorialOverlay />}
       {dead.value && <DeathOverlay />}
+      <WeatherOverlay />
     </>
   );
 }

@@ -37,8 +37,16 @@ import {
   guildInfo,
   lastFishingResult,
   isFishing,
+  lastGatherResult,
+  isGathering,
+  miningLevel,
+  gatheringLevel,
+  miningXp,
+  gatheringXp,
   factions,
   activeSets,
+  currentWeather,
+  titleState,
   type Quest,
   type PlayerStats,
 } from '../../store/GameStore';
@@ -48,6 +56,8 @@ import { recordDamageSource, freezeDeathRecap, clearDeathRecap } from '../../ui-
 import { updateAchievement, setAchievementProgress } from '../../ui-html/panels/AchievementPanel';
 import { setLoadingProgress } from '../../ui-html/screens/LoadingScreen';
 import { playSFX } from '../../systems/AudioSystem';
+import { updateLeaderboardFromServer } from '../../ui-html/panels/LeaderboardPanel';
+import { petState, auctionState, mountState, mailbox, arenaState, dailyQuests, setActiveWorldEvent, blessings, stamina, bestiary, bountyBoard, myBounty } from '../../store/GameStore';
 import type { RemoteEntityMap } from './entityRendering';
 
 type PlayerPositionUpdate = {
@@ -88,6 +98,7 @@ interface GameSceneEffectDeps {
   showEffectTick(effectType: string, value: number): void;
   shakeCamera(intensity?: number, duration?: number): void;
   showHealNumber(x: number, y: number, amount: number): void;
+  showComboText(x: number, y: number, combo: number): void;
 }
 
 export interface GameSceneNetworkDeps {
@@ -211,6 +222,12 @@ export function registerGameSceneNetworkHandlers(deps: GameSceneNetworkDeps): vo
       activeSets.value = raw.setBonuses as any[];
     }
 
+    // Sync mining/gathering levels from server
+    if (raw.miningLevel !== undefined) miningLevel.value = raw.miningLevel as number;
+    if (raw.miningXp !== undefined) miningXp.value = raw.miningXp as number;
+    if (raw.gatheringLevel !== undefined) gatheringLevel.value = raw.gatheringLevel as number;
+    if (raw.gatheringXp !== undefined) gatheringXp.value = raw.gatheringXp as number;
+
     // Initialize hotbar when class is known
     if (raw.class !== undefined) initHotbarForClass(raw.class as string);
   }));
@@ -235,12 +252,13 @@ export function registerGameSceneNetworkHandlers(deps: GameSceneNetworkDeps): vo
   }));
 
   deps.register(MessageType.CombatEvent, withErrorLogging('CombatEvent', (msg) => {
-    const { attackerId, targetId, damage, isCrit, targetHp } = msg.payload as {
+    const { attackerId, targetId, damage, isCrit, targetHp, combo } = msg.payload as {
       attackerId: string;
       targetId: string;
       damage: number;
       isCrit: boolean;
       targetHp?: number;
+      combo?: number;
     };
     const target = deps.world.entities.get(targetId);
     if (target) {
@@ -256,8 +274,12 @@ export function registerGameSceneNetworkHandlers(deps: GameSceneNetworkDeps): vo
       }
     }
 
-    // Combat log + achievement tracking
+    // Combo counter display
     const isPlayerAttacker = attackerId === deps.player.getId();
+    if (isPlayerAttacker && combo && combo > 1 && target) {
+      deps.effects.showComboText(target.sprite.x + 30, target.sprite.y - 40, combo);
+    }
+
     const isPlayerTarget = targetId === deps.player.getId();
     const targetName = target?.nameText?.text || targetId.slice(0, 8);
     const attackerName = isPlayerAttacker ? 'You' : attackerId.slice(0, 8);
@@ -611,9 +633,182 @@ export function registerGameSceneNetworkHandlers(deps: GameSceneNetworkDeps): vo
     }
   }));
 
+  // ─── Gather Result handler ─────────────────────────────────
+  deps.register(MessageType.GatherResult, withErrorLogging('GatherResult', (msg) => {
+    const p = msg.payload as import('../../store/GameStore').GatherResult;
+    lastGatherResult.value = p;
+    isGathering.value = false;
+    miningLevel.value = p.miningLevel;
+    gatheringLevel.value = p.gatheringLevel;
+    if (p.miningXp !== undefined) miningXp.value = p.miningXp;
+    if (p.gatheringXp !== undefined) gatheringXp.value = p.gatheringXp;
+    if (p.items && p.items.length > 0) {
+      const names = p.items.map(i => `${i.icon} ${i.name} x${i.quantity}`).join(', ');
+      showToast(`⛏️ Gathered: ${names} (+${p.xpGained} XP)`, 'success');
+      playSFX('loot_pickup');
+    }
+  }));
+
   // ─── Faction Data handler ─────────────────────────────────
   deps.register(MessageType.FactionData, withErrorLogging('FactionData', (msg) => {
     const p = msg.payload as { factions: import('../../store/GameStore').FactionInfo[] };
     factions.value = p.factions ?? [];
+  }));
+
+  deps.register(MessageType.WeatherUpdate, withErrorLogging('WeatherUpdate', (msg) => {
+    const p = msg.payload as { weather: string; icon: string; intensity: number };
+    currentWeather.value = { weather: p.weather, icon: p.icon, intensity: p.intensity ?? 0.3 };
+  }));
+
+  deps.register(MessageType.TitleUpdate, withErrorLogging('TitleUpdate', (msg) => {
+    const p = msg.payload as { catalog: { id: string; name: string; description: string }[]; unlocked: string[]; active: string };
+    titleState.value = { catalog: p.catalog ?? [], unlocked: p.unlocked ?? [], active: p.active ?? '' };
+  }));
+
+  // ─── Leaderboard ────────────────────────────────────────────
+  deps.register(MessageType.LeaderboardData, withErrorLogging('LeaderboardData', (msg) => {
+    updateLeaderboardFromServer(msg.payload);
+  }));
+
+  // ─── Pet Update ───────────────────────────────────────────
+  deps.register(MessageType.PetUpdate, withErrorLogging('PetUpdate', (msg) => {
+    const p = msg.payload as any;
+    petState.value = {
+      active: p.active ?? null,
+      collection: p.collection ?? [],
+    };
+  }));
+
+  // ─── Auction Data ─────────────────────────────────────────
+  deps.register(MessageType.AuctionData, withErrorLogging('AuctionData', (msg) => {
+    const p = msg.payload as any;
+    auctionState.value = {
+      listings: (p.listings ?? []).map((l: any) => ({
+        id: l.id,
+        item: l.item,
+        price: l.price,
+        seller: l.seller,
+        timeLeft: l.timeLeft ?? 0,
+      })),
+      myListings: (p.myListings ?? []).map((l: any) => ({
+        id: l.id,
+        item: l.item,
+        price: l.price,
+        seller: l.seller,
+        timeLeft: l.timeLeft ?? 0,
+      })),
+    };
+  }));
+
+  // ─── Mount Update ──────────────────────────────────────────
+  deps.register(MessageType.MountUpdate, withErrorLogging('MountUpdate', (msg) => {
+    const p = msg.payload as any;
+    mountState.value = {
+      mounted: p.mounted ?? false,
+      mountName: p.mountName ?? '',
+      speedBonus: p.speedBonus ?? 0,
+    };
+  }));
+
+  // ─── Mail Data ─────────────────────────────────────────────
+  deps.register(MessageType.MailData, withErrorLogging('MailData', (msg) => {
+    const p = msg.payload as any;
+    mailbox.value = (p.mails ?? []).map((m: any) => ({
+      id: m.id,
+      from: m.from,
+      subject: m.subject,
+      body: m.body,
+      gold: m.gold ?? 0,
+      item: m.item,
+      read: m.read ?? false,
+      hasAttachment: m.hasAttachment ?? false,
+    }));
+  }));
+
+  // ─── Arena Update ──────────────────────────────────────────
+  deps.register(MessageType.ArenaUpdate, withErrorLogging('ArenaUpdate', (msg) => {
+    const p = msg.payload as any;
+    const current = arenaState.value;
+    if (p.action === 'queued') {
+      arenaState.value = { ...current, queued: true };
+    } else if (p.action === 'left_queue') {
+      arenaState.value = { ...current, queued: false };
+    } else if (p.action === 'match_start') {
+      arenaState.value = { ...current, queued: false, inMatch: true, opponent: p.opponent, opponentId: p.opponentId };
+    } else if (p.action === 'match_end') {
+      arenaState.value = {
+        ...current, inMatch: false, opponent: '', opponentId: '',
+        rating: p.newRating ?? current.rating,
+        wins: p.wins ?? current.wins,
+        losses: p.losses ?? current.losses,
+      };
+    }
+  }));
+
+  // ─── Daily Quest Data ──────────────────────────────────────
+  deps.register(MessageType.DailyQuestData, withErrorLogging('DailyQuestData', (msg) => {
+    const p = msg.payload as any;
+    dailyQuests.value = (p.dailyQuests ?? []).map((q: any) => ({
+      questId: q.questId,
+      title: q.title,
+      description: q.description,
+      objective: q.objective,
+      target: q.target,
+      progress: q.progress,
+      completed: q.completed,
+      rewardXp: q.rewardXp,
+      rewardGold: q.rewardGold,
+    }));
+  }));
+
+  // World Event Active — persistent HUD bar
+  deps.register(MessageType.WorldEventActive, withErrorLogging('WorldEventActive', (msg) => {
+    const p = msg.payload as any;
+    setActiveWorldEvent(p.event_type, p.duration_ms);
+  }));
+
+  // ─── Blessings Update ──────────────────────────────────────
+  deps.register(MessageType.BlessingUpdate, withErrorLogging('BlessingUpdate', (msg) => {
+    const p = msg.payload as any;
+    if (p.blessings !== undefined) blessings.value = p.blessings;
+    if (p.stamina !== undefined) stamina.value = p.stamina;
+  }));
+
+  // ─── Bestiary Data ──────────────────────────────────────
+  deps.register(MessageType.BestiaryData, withErrorLogging('BestiaryData', (msg) => {
+    const p = msg.payload as any;
+    if (Array.isArray(p.entries)) {
+      bestiary.value = p.entries.map((e: any) => ({
+        name: e.name,
+        kills: e.kills,
+        tier: e.tier ?? 0,
+        maxHp: e.maxHp ?? 0,
+        xp: e.xp ?? 0,
+        loot: e.loot ?? [],
+      }));
+    }
+  }));
+
+  // ─── Bounty Update ──────────────────────────────────────
+  deps.register(MessageType.BountyUpdate, withErrorLogging('BountyUpdate', (msg) => {
+    const p = msg.payload as any;
+    if (Array.isArray(p.bounties)) {
+      bountyBoard.value = p.bounties.map((b: any) => ({
+        name: b.name,
+        bounty: b.bounty ?? b.amount ?? 0,
+        level: b.level ?? 0,
+      }));
+    }
+    if (p.myBounty !== undefined) myBounty.value = p.myBounty;
+  }));
+
+  // ─── Rune Craft Result ──────────────────────────────────────
+  deps.register(MessageType.RuneResult, withErrorLogging('RuneResult', (msg) => {
+    const p = msg.payload as any;
+    if (p.success) {
+      showToast(`✨ Crafted ${p.rune_name ?? 'rune'} successfully!`, 'success');
+    } else {
+      showToast(`❌ ${p.error ?? 'Rune craft failed'}`, 'danger');
+    }
   }));
 }

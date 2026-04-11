@@ -13,16 +13,6 @@ export const VIEW_DISTANCE_CHUNKS = 3; // Chunks visible around player
 export const PLAYER_SPEED = 3; // Tiles per second
 export const INTERPOLATION_SPEED = 0.15;
 
-// Colors by rarity
-export const RARITY_COLORS: Record<number, number> = {
-  0: 0xffffff, // Common - White
-  1: 0x00ff00, // Uncommon - Green
-  2: 0x0088ff, // Rare - Blue
-  3: 0xaa00ff, // Epic - Purple
-  4: 0xff8800, // Legendary - Orange
-  5: 0xff0000, // Mythic - Red
-};
-
 // UI
 export const GAME_WIDTH = 1280;
 export const GAME_HEIGHT = 720;

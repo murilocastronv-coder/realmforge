@@ -1,217 +1,33 @@
 import Phaser from 'phaser';
-import { WebSocketClient, MessageType } from '../network/WebSocketClient';
-import { GAME_WIDTH, GAME_HEIGHT } from '../utils/Constants';
+import { isAuthenticated, playerId, username } from '../store/GameStore';
+import { getAuthService } from '../services/AuthService';
 
 /**
- * LoginScene — Polished login/register UI with RealmForge branding.
+ * LoginScene — Thin Phaser bridge that waits for HTML login.
+ *
+ * The actual login UI is rendered by Preact (LoginScreen.tsx).
+ * This scene simply polls the `isAuthenticated` signal and,
+ * once auth succeeds, sets Phaser registry values and transitions
+ * to the GameScene.
  */
 export class LoginScene extends Phaser.Scene {
-  private network!: WebSocketClient;
-  private authHandler?: (msg: { type: number; payload: unknown }) => void;
-
   constructor() {
     super({ key: 'LoginScene' });
   }
 
-  init(): void {
-    this.network = this.registry.get('network') as WebSocketClient;
-    if (!this.network) {
-      this.network = new WebSocketClient();
-      this.registry.set('network', this.network);
-    }
-  }
-
   create(): void {
-    const cx = GAME_WIDTH / 2;
-    const cy = GAME_HEIGHT / 2;
-
-    this.cameras.main.setBackgroundColor(0x0a0e17);
-    this.cameras.main.fadeIn(300, 0, 0, 0);
-
-    // Decorative background stars
-    for (let i = 0; i < 40; i++) {
-      const sx = Math.random() * GAME_WIDTH;
-      const sy = Math.random() * GAME_HEIGHT;
-      const star = this.add.circle(sx, sy, Math.random() * 1.5 + 0.5, 0xffffff, Math.random() * 0.4 + 0.1);
-      this.tweens.add({
-        targets: star, alpha: Math.random() * 0.2,
-        duration: 2000 + Math.random() * 3000,
-        yoyo: true, repeat: -1,
-      });
-    }
-
-    // Title with glow
-    this.add.text(cx, cy - 150, '🏰 REALMFORGE', {
-      fontSize: '36px', color: '#f0c040', fontStyle: 'bold',
-      stroke: '#000', strokeThickness: 4,
-    }).setOrigin(0.5);
-
-    this.add.text(cx, cy - 112, 'Infinite Worlds. Endless Adventure.', {
-      fontSize: '11px', color: '#6688aa', fontStyle: 'italic',
-    }).setOrigin(0.5);
-
-    // Login panel background
-    const panelBg = this.add.rectangle(cx, cy + 10, 320, 200, 0x111822, 0.85);
-    panelBg.setStrokeStyle(1, 0x334455);
-
-    // Labels
-    this.add.text(cx - 130, cy - 52, 'Username', { fontSize: '11px', color: '#8899aa' });
-    this.add.text(cx - 130, cy + 2, 'Password', { fontSize: '11px', color: '#8899aa' });
-
-    const usernameInput = this.createInput(cx, cy - 35, 'username');
-    const passwordInput = this.createInput(cx, cy + 20, 'password', true);
-
-    // Buttons
-    const loginBtn = this.add.text(cx - 65, cy + 60, '▶  LOGIN', {
-      fontSize: '14px', color: '#00cc66', fontStyle: 'bold',
-    }).setInteractive({ useHandCursor: true });
-
-    const registerBtn = this.add.text(cx + 25, cy + 60, 'REGISTER', {
-      fontSize: '14px', color: '#4488ff',
-    }).setInteractive({ useHandCursor: true });
-
-    // Hover effects
-    [loginBtn, registerBtn].forEach(btn => {
-      btn.on('pointerover', () => btn.setScale(1.05));
-      btn.on('pointerout', () => btn.setScale(1));
-    });
-
-    const statusText = this.add.text(cx, cy + 95, '', {
-      fontSize: '11px', color: '#ff4444',
-    }).setOrigin(0.5);
-
-    // Version tag
-    this.add.text(cx, GAME_HEIGHT - 20, 'RealmForge v0.1.0 — Open Source MMORPG', {
-      fontSize: '9px', color: '#334455',
-    }).setOrigin(0.5);
-
-    let authInProgress = false;
-
-    const doAuth = (isRegister: boolean) => {
-      if (authInProgress) return;
-
-      const username = usernameInput.value.trim();
-      const password = passwordInput.value.trim();
-
-      if (!username || !password) {
-        statusText.setText('Please enter username and password');
-        statusText.setColor('#ff6644');
-        return;
-      }
-      if (username.length < 3) {
-        statusText.setText('Username must be at least 3 characters');
-        statusText.setColor('#ff6644');
-        return;
-      }
-
-      statusText.setText('⟳ Connecting...');
-      statusText.setColor('#ffdd44');
-      authInProgress = true;
-
-      if (!this.network.connected) {
-        this.network.connect();
-      }
-
-      const tryAuth = () => {
-        if (this.network.connected) {
-          this.network.send(MessageType.Auth, { username, password, isRegister });
-        } else {
-          setTimeout(tryAuth, 200);
-        }
-      };
-      setTimeout(tryAuth, 300);
-    };
-
-    loginBtn.on('pointerdown', () => doAuth(false));
-    registerBtn.on('pointerdown', () => doAuth(true));
-
-    // Allow Enter key to login
-    passwordInput.addEventListener('keydown', (e: KeyboardEvent) => {
-      if (e.key === 'Enter') doAuth(false);
-    });
-
-    this.authHandler = (msg) => {
-      const result = msg.payload as { success: boolean; playerId?: string; error?: string };
-      if (result.success) {
-        statusText.setText('✅ Success! Entering world...');
-        statusText.setColor('#00cc66');
-        this.registry.set('playerId', result.playerId);
-        this.registry.set('username', usernameInput.value.trim());
-        // Clean up DOM inputs, resize handlers, and auth listener
-        this.cleanup(usernameInput, passwordInput);
-        this.cameras.main.fadeOut(400, 0, 0, 0);
-        this.time.delayedCall(450, () => this.scene.start('GameScene'));
-      } else {
-        statusText.setText(result.error || 'Authentication failed');
-        statusText.setColor('#ff4444');
-        authInProgress = false;
-      }
-    };
-    this.network.on(MessageType.AuthResult, this.authHandler);
-
-    // Clean up listener on scene shutdown (prevents accumulation on restart)
-    this.events.once('shutdown', () => {
-      this.cleanup(usernameInput, passwordInput);
-    });
+    // Nothing to render — the HTML overlay handles the login UI
   }
 
-  private cleanup(usernameInput?: HTMLInputElement, passwordInput?: HTMLInputElement): void {
-    if (this.authHandler) {
-      this.network.off(MessageType.AuthResult, this.authHandler);
-      this.authHandler = undefined;
-    }
-    this.resizeHandlers.forEach(h => window.removeEventListener('resize', h));
-    this.resizeHandlers = [];
-    usernameInput?.remove();
-    passwordInput?.remove();
-  }
+  update(): void {
+    if (!isAuthenticated.value) return;
 
-  private resizeHandlers: Array<() => void> = [];
+    // Auth succeeded — bridge to GameScene via registry
+    const auth = getAuthService();
+    this.registry.set('network', auth.getNetwork());
+    this.registry.set('playerId', playerId.value);
+    this.registry.set('username', username.value);
 
-  private createInput(x: number, y: number, id: string, isPassword = false): HTMLInputElement {
-    const input = document.createElement('input');
-    input.type = isPassword ? 'password' : 'text';
-    input.id = `rf-${id}`;
-    input.placeholder = isPassword ? '••••••••' : 'Enter username';
-    input.style.cssText = `
-      position: fixed;
-      background: #0d1220;
-      color: #ddeeff;
-      border: 1px solid #334455;
-      border-radius: 4px;
-      padding: 2px 10px;
-      font-size: 13px;
-      font-family: monospace;
-      outline: none;
-      transition: border-color 0.2s;
-      box-sizing: border-box;
-    `;
-    input.onfocus = () => { input.style.borderColor = '#4488ff'; };
-    input.onblur = () => { input.style.borderColor = '#334455'; };
-    document.body.appendChild(input);
-
-    // Phaser coordinates for this input
-    const phaserX = x - 120;
-    const phaserY = y + 10;
-    const phaserW = 240;
-    const phaserH = 28;
-
-    const reposition = () => {
-      const canvas = this.game.canvas;
-      const rect = canvas.getBoundingClientRect();
-      const scaleX = rect.width / GAME_WIDTH;
-      const scaleY = rect.height / GAME_HEIGHT;
-      input.style.left = `${rect.left + phaserX * scaleX}px`;
-      input.style.top = `${rect.top + phaserY * scaleY}px`;
-      input.style.width = `${phaserW * scaleX}px`;
-      input.style.height = `${phaserH * scaleY}px`;
-      input.style.fontSize = `${Math.max(10, Math.round(13 * scaleY))}px`;
-    };
-
-    reposition();
-    window.addEventListener('resize', reposition);
-    this.resizeHandlers.push(reposition);
-
-    return input;
+    this.scene.start('GameScene');
   }
 }

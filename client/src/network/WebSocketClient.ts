@@ -28,6 +28,16 @@ export enum MessageType {
   EnchantItem = 27,
   FishingAction = 28,
   FactionAction = 29,
+  GatherAction = 32,
+  AuctionAction = 34,
+  MountAction = 35,
+  MailAction = 36,
+  ArenaAction = 37,
+  DailyQuestClaim = 38,
+  BuyBlessing = 40,
+  BestiaryRequest = 41,
+  BountyAction = 42,
+  RuneCraft = 43,
 
   // Server → Client
   AuthResult = 50,
@@ -66,6 +76,21 @@ export enum MessageType {
   EnchantResult = 89,
   FishingResult = 90,
   FactionData = 91,
+  WeatherUpdate = 92,
+  TitleUpdate = 93,
+  PetUpdate = 94,
+  GatherResult = 95,
+  LeaderboardData = 96,
+  AuctionData = 97,
+  MountUpdate = 98,
+  MailData = 99,
+  ArenaUpdate = 100,
+  DailyQuestData = 101,
+  WorldEventActive = 102,
+  BlessingUpdate = 104,
+  BestiaryData = 105,
+  BountyUpdate = 106,
+  RuneResult = 107,
 }
 
 export interface GameMessage {
@@ -103,6 +128,10 @@ export interface EntityState {
   spriteKey?: string;
   direction?: number;
   action?: string;
+  skull?: number;
+  mounted?: boolean;
+  mountName?: string;
+  arenaRating?: number;
 }
 
 export interface ChunkDataPayload {

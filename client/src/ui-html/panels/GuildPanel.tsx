@@ -127,8 +127,8 @@ export function GuildPanel() {
               placeholder="Guild Name (3-24 chars)"
               value={guildName.value}
               onInput={(e) => { guildName.value = (e.target as HTMLInputElement).value; }}
-              onFocus={() => InputGate.claimKeyboard('guild-create-name')}
-              onBlur={() => InputGate.releaseKeyboard('guild-create-name')}
+              onFocus={() => InputGate.claimFocus('guild-create-name' as any)}
+              onBlur={() => InputGate.releaseFocus('guild-create-name' as any)}
               maxLength={24}
             />
             <input
@@ -137,8 +137,8 @@ export function GuildPanel() {
               placeholder="Tag (2-4 chars, e.g. RF)"
               value={guildTag.value}
               onInput={(e) => { guildTag.value = (e.target as HTMLInputElement).value; }}
-              onFocus={() => InputGate.claimKeyboard('guild-create-tag')}
-              onBlur={() => InputGate.releaseKeyboard('guild-create-tag')}
+              onFocus={() => InputGate.claimFocus('guild-create-tag' as any)}
+              onBlur={() => InputGate.releaseFocus('guild-create-tag' as any)}
               maxLength={4}
             />
             <button
@@ -215,8 +215,8 @@ export function GuildPanel() {
                   placeholder="Set MOTD..."
                   value={motdInput.value}
                   onInput={(e) => { motdInput.value = (e.target as HTMLInputElement).value; }}
-                  onFocus={() => InputGate.claimKeyboard('guild-motd')}
-                  onBlur={() => InputGate.releaseKeyboard('guild-motd')}
+                  onFocus={() => InputGate.claimFocus('guild-motd' as any)}
+                  onBlur={() => InputGate.releaseFocus('guild-motd' as any)}
                   maxLength={200}
                 />
                 <button
@@ -236,8 +236,8 @@ export function GuildPanel() {
                   placeholder="Deposit gold..."
                   value={depositAmount.value}
                   onInput={(e) => { depositAmount.value = (e.target as HTMLInputElement).value; }}
-                  onFocus={() => InputGate.claimKeyboard('guild-deposit')}
-                  onBlur={() => InputGate.releaseKeyboard('guild-deposit')}
+                  onFocus={() => InputGate.claimFocus('guild-deposit' as any)}
+                  onBlur={() => InputGate.releaseFocus('guild-deposit' as any)}
                   min={1}
                 />
                 <button
@@ -257,8 +257,8 @@ export function GuildPanel() {
                   placeholder="Invite player..."
                   value={inviteTarget.value}
                   onInput={(e) => { inviteTarget.value = (e.target as HTMLInputElement).value; }}
-                  onFocus={() => InputGate.claimKeyboard('guild-invite')}
-                  onBlur={() => InputGate.releaseKeyboard('guild-invite')}
+                  onFocus={() => InputGate.claimFocus('guild-invite' as any)}
+                  onBlur={() => InputGate.releaseFocus('guild-invite' as any)}
                   onKeyDown={(e) => { if (e.key === 'Enter') handleInvite(); }}
                 />
                 <button
@@ -318,8 +318,8 @@ export function GuildPanel() {
                   placeholder="Message guild..."
                   value={chatInput.value}
                   onInput={(e) => { chatInput.value = (e.target as HTMLInputElement).value; }}
-                  onFocus={() => InputGate.claimKeyboard('guild-chat')}
-                  onBlur={() => InputGate.releaseKeyboard('guild-chat')}
+                  onFocus={() => InputGate.claimFocus('guild-chat' as any)}
+                  onBlur={() => InputGate.releaseFocus('guild-chat' as any)}
                   onKeyDown={(e) => { if (e.key === 'Enter') handleChat(); }}
                 />
                 <button
