@@ -216,6 +216,12 @@ async fn main() {
     let app = Router::new()
         .route("/ws", get(ws_handler))
         .route("/health", get(|| async { "OK" }))
+        .route("/stats", get({ let stats_state = state.clone(); move || async move {
+            axum::Json(serde_json::json!({
+                "online": stats_state.players.len(),
+                "registered": stats_state.accounts.len()
+            }))
+        }}))
         .layer(
             tower_http::cors::CorsLayer::new()
                 .allow_origin(tower_http::cors::Any)
