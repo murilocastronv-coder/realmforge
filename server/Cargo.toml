@@ -23,3 +23,5 @@ bincode = "1"
 opt-level = 3
 lto = true
 codegen-units = 1
+
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres"] }
