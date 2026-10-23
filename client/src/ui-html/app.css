@@ -260,3 +260,35 @@
 .level-badge {
   animation: level-glow 2s ease-in-out infinite;
 }
+
+/* Real mobile layout overrides for the actual Preact game UI */
+@media (max-width: 700px), (pointer: coarse) and (max-width: 900px) {
+  #ui-root [data-panel-shell] {
+    position: fixed !important; left: 8px !important; right: 8px !important;
+    top: max(8px, env(safe-area-inset-top)) !important; bottom: auto !important;
+    width: auto !important; max-width: none !important; max-height: 54dvh !important;
+    overflow: hidden !important; z-index: 1000 !important;
+    display: flex !important; flex-direction: column !important;
+  }
+  #ui-root [data-panel-shell] > .flex-1 { min-height: 0 !important; overflow-y: auto !important; overscroll-behavior: contain; }
+  #ui-root [data-panel-shell] .rf-panel-close {
+    display: inline-flex !important; align-items: center !important; justify-content: center !important;
+    flex: 0 0 40px !important; width: 40px !important; height: 40px !important;
+    min-width: 40px !important; min-height: 40px !important; margin: -6px -8px -6px 8px !important;
+    border: 1px solid #e3c47c !important; border-radius: 8px !important;
+    background: #111b27 !important; color: #ffe09a !important; font-size: 20px !important;
+    line-height: 1 !important; position: relative !important; z-index: 1002 !important;
+    touch-action: manipulation !important;
+  }
+  #ui-root [data-panel-shell] > .flex:first-child { min-height: 48px !important; flex-shrink: 0 !important; }
+  #ui-root [data-panel-shell] [class*="max-h-64"] { max-height: 28dvh !important; }
+  #ui-root [data-interactive].fixed.bottom-4.left-4 {
+    left: 8px !important; right: 8px !important; bottom: calc(8px + env(safe-area-inset-bottom)) !important;
+    width: auto !important; max-width: none !important; z-index: 900 !important;
+    max-height: 27dvh !important; overflow: hidden !important;
+  }
+  #ui-root [data-interactive].fixed.bottom-4.left-4 > div:nth-child(2) {
+    max-height: 17dvh !important; height: auto !important; overflow-y: auto !important;
+  }
+  #ui-root button, #ui-root input { touch-action: manipulation; }
+}
