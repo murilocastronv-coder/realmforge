@@ -224,11 +224,12 @@ async fn main() {
         )
         .with_state(state);
 
-    let addr = "0.0.0.0:8080";
+    let port = std::env::var("PORT").unwrap_or_else(|_| "8080".to_string());
+    let addr = format!("0.0.0.0:{}", port);
     info!("🏰 RealmForge server starting on {}", addr);
     info!("   WebSocket endpoint: ws://{}/ws", addr);
 
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
 }
 
