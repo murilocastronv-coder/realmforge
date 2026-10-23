@@ -16,6 +16,7 @@ export function ChatBox() {
   const currentChannel = useSignal<Channel>('global');
   const inputActive = useSignal(false);
   const minimized = useSignal(false);
+  const hiddenOnMobile = useSignal(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
 
@@ -115,10 +116,12 @@ export function ChatBox() {
     return `${prefix}[${msg.sender}]: ${msg.text}`;
   };
 
+  if (hiddenOnMobile.value) return <button data-interactive type="button" aria-label="Reabrir chat" class="rf-chat-reopen fixed bottom-4 left-4 z-[95] rounded-lg border border-rf-border bg-rf-chrome-header px-4 py-3 text-sm font-bold text-rf-gold shadow-lg" onClick={() => { hiddenOnMobile.value = false; }}>💬 CHAT</button>;
+
   return (
     <div
       data-interactive
-      class="fixed bottom-4 left-4 w-[360px] max-w-[calc(100vw-2rem)] flex flex-col rounded border border-rf-border-muted bg-rf-surface/80 backdrop-blur-sm shadow-lg shadow-rf-shadow/40"
+      class="rf-chat-window fixed bottom-4 left-4 w-[360px] max-w-[calc(100vw-2rem)] flex flex-col rounded border border-rf-border-muted bg-rf-surface/80 backdrop-blur-sm shadow-lg shadow-rf-shadow/40"
       onMouseEnter={() => InputGate.claimPointer('chat')}
       onMouseLeave={() => InputGate.releasePointer('chat')}
     >
@@ -148,6 +151,7 @@ export function ChatBox() {
         >
           {minimized.value ? '▪' : '−'}
         </button>
+        <button type="button" class="rf-chat-close ml-1 text-sm leading-none" onClick={() => { inputActive.value = false; InputGate.releaseFocus('chat'); hiddenOnMobile.value = true; }} title="Close chat" aria-label="Fechar chat">✕</button>
       </div>
 
       {/* Messages */}
