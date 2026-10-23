@@ -99,8 +99,10 @@ export function TutorialOverlay() {
         <div class="flex items-center justify-between px-4 py-2 bg-rf-chrome-header rounded-t-lg border-b border-rf-chrome-trim">
           <span class="text-sm font-bold text-rf-gold">{currentStep.title}</span>
           <button
-            class="text-[10px] text-rf-text-dim hover:text-rf-danger border border-rf-border-muted rounded px-2 py-0.5 transition-colors"
-            onClick={finish}
+            type="button"
+            aria-label="Fechar tutorial"
+            class="rf-tutorial-close text-[10px] text-rf-text-dim hover:text-rf-danger border border-rf-border-muted rounded px-2 py-0.5 transition-colors"
+            onClick={(e) => { e.preventDefault(); e.stopPropagation(); finish(); }}
           >
             SKIP
           </button>
