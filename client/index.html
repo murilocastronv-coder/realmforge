@@ -61,6 +61,7 @@
 
     /* RealmForge mobile HUD: safe-area aware, scrollable panels, reachable close controls */
     .rf-mobile-close,.rf-chat-toggle{display:none}
+    #ui-root .rf-panel-close{min-width:48px!important;width:48px!important;min-height:48px!important;height:48px!important;flex:0 0 48px!important;padding:0!important;display:inline-flex!important;align-items:center!important;justify-content:center!important;font-size:24px!important;line-height:1!important;position:relative!important;z-index:99999!important;pointer-events:auto!important;touch-action:manipulation!important;}
     @media(max-width:700px),(pointer:coarse) and (max-width:900px){
       html,body{width:100%;height:100dvh;overflow:hidden;overscroll-behavior:none}
       #game-container,#ui-root{position:fixed;inset:0;width:100%;height:100dvh;overflow:hidden}
@@ -141,56 +142,6 @@
       document.getElementById('world-features').scrollIntoView({behavior:'smooth',block:'center'});
     });
   </script>
-
-  // Mobile-friendly close/reopen controls for existing game panels and chat.
-  (() => {
-    const mobile = () => window.matchMedia('(max-width: 700px), (pointer:coarse) and (max-width:900px)').matches;
-    const seen = new WeakSet();
-    let chatToggle;
-    function visible(el) {
-      if (!el || !(el instanceof HTMLElement)) return false;
-      const r=el.getBoundingClientRect(), s=getComputedStyle(el);
-      return r.width>100 && r.height>45 && s.display!=='none' && s.visibility!=='hidden';
-    }
-    function addClose(panel, chat=false) {
-      if (seen.has(panel)) return;
-      seen.add(panel);
-      panel.classList.add('rf-mobile-panel');
-      if(chat) panel.classList.add('rf-chat-panel');
-      const close=document.createElement('button');
-      close.type='button'; close.className='rf-mobile-close'; close.textContent='✕';
-      close.setAttribute('aria-label',chat?'Recolher chat':'Fechar painel');
-      close.addEventListener('click',()=>{panel.classList.add('rf-collapsed'); if(chat && chatToggle) chatToggle.textContent='💬 Chat';});
-      panel.prepend(close);
-      if(chat) {
-        chatToggle=document.createElement('button'); chatToggle.type='button'; chatToggle.className='rf-chat-toggle'; chatToggle.textContent='💬 Chat';
-        chatToggle.addEventListener('click',()=>{const hidden=panel.classList.toggle('rf-collapsed')===false;chatToggle.textContent=hidden?'✕ Fechar chat':'💬 Chat';});
-        document.body.append(chatToggle);
-      }
-    }
-    function scan() {
-      if(!mobile()) return;
-      const all=[...document.querySelectorAll('body *')].filter(visible);
-      for(const el of all) {
-        if(el.children.length>5) continue;
-        const t=(el.innerText||'').trim().toLowerCase();
-        if(t.startsWith('dungeon finder') || t.includes('dungeon finder')) {
-          let p=el;
-          for(let i=0;i<7 && p.parentElement;i++){p=p.parentElement;if(visible(p) && (getComputedStyle(p).position==='fixed'||getComputedStyle(p).position==='absolute') && p.getBoundingClientRect().height>120) break;}
-          if(visible(p) && !p.classList.contains('rf-mobile-panel')) addClose(p,false);
-        }
-        if(t.includes('global') && t.includes('local') && t.includes('trade') && t.includes('guild') && t.length<1000) {
-          let p=el;
-          for(let i=0;i<7 && p.parentElement;i++){p=p.parentElement;if(visible(p) && (getComputedStyle(p).position==='fixed'||getComputedStyle(p).position==='absolute') && p.getBoundingClientRect().height>80) break;}
-          if(visible(p) && !p.classList.contains('rf-chat-panel')) addClose(p,true);
-        }
-      }
-    }
-    const observer=new MutationObserver(()=>scan());
-    observer.observe(document.body,{childList:true,subtree:true});
-    window.addEventListener('resize',scan,{passive:true});
-    setTimeout(scan,500);setTimeout(scan,1500);setTimeout(scan,3000);
-  })();
 
   <script type="module" src="/src/main.ts"></script>
 </body>
