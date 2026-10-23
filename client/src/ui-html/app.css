@@ -292,3 +292,9 @@
   }
   #ui-root button, #ui-root input { touch-action: manipulation; }
 }
+
+@media (max-width: 700px), (pointer: coarse) and (max-width: 900px) {
+  #ui-root .rf-chat-window { left:8px!important;right:8px!important;bottom:calc(8px + env(safe-area-inset-bottom))!important;width:auto!important;max-width:none!important;z-index:900!important; }
+  #ui-root .rf-chat-close,#ui-root .rf-chat-window button,#ui-root .rf-tutorial-close { display:inline-flex!important;align-items:center!important;justify-content:center!important;min-width:42px!important;min-height:42px!important;padding:8px!important;border:1px solid #d9b96f!important;border-radius:8px!important;background:#111b27!important;color:#ffe09a!important;font-size:14px!important;touch-action:manipulation!important;position:relative!important;z-index:10010!important; }
+  #ui-root .rf-chat-reopen {left:8px!important;bottom:calc(12px + env(safe-area-inset-bottom))!important;z-index:2000!important;min-height:48px!important;}
+}
