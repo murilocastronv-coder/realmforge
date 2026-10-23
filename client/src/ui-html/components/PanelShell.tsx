@@ -31,7 +31,7 @@ export function PanelShell({ title, onClose, children, width = 'w-80', className
         <span class="text-[11px] font-bold tracking-wider text-rf-gold uppercase">{title}</span>
         <button
           class="rf-panel-close text-rf-text-dim hover:text-rf-danger transition-colors text-sm leading-none px-1" aria-label="Fechar painel"
-          onClick={onClose}
+          onClick={(e) => { e.preventDefault(); e.stopPropagation(); onClose(); }}
           title="Close"
         >
           ✕
