@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>RealmForge — MMORPG</title>
+  <title>RealmForge — Enter the Forgotten Realm</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
@@ -34,11 +34,94 @@
       -moz-osx-font-smoothing: grayscale !important;
       letter-spacing: 0.02em;
     }
+    #landing { position:fixed; inset:0; z-index:1000; overflow-y:auto; color:#f7f2e8; font-family:Inter,system-ui,sans-serif; background:radial-gradient(ellipse at 50% 20%,rgba(44,94,102,.48),transparent 48%),linear-gradient(145deg,#071116 0%,#111b24 50%,#090d14 100%); }
+    #landing:before { content:"";position:absolute;inset:0;pointer-events:none;opacity:.13;background-image:linear-gradient(rgba(255,255,255,.06) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.06) 1px,transparent 1px);background-size:44px 44px;mask-image:linear-gradient(to bottom,black,transparent 85%); }
+    .land-wrap { position:relative; max-width:1120px; margin:auto; padding:24px 24px 56px; min-height:100%; display:flex;flex-direction:column; }
+    .land-nav { display:flex;align-items:center;justify-content:space-between;gap:12px; }
+    .brand { display:flex;align-items:center;gap:10px;font-weight:800;letter-spacing:.12em;font-size:14px; }
+    .brand-mark { width:38px;height:38px;display:grid;place-items:center;border:1px solid #d6b46d;border-radius:12px;color:#f0cf84;font-size:21px;background:#d6b46d12; }
+    .server-pill { border:1px solid #31554f;background:#0b2925;color:#9ee2bf;border-radius:99px;padding:8px 12px;font-size:11px;letter-spacing:.08em;white-space:nowrap; }
+    .hero { text-align:center;margin:auto 0;padding:64px 0 44px; }
+    .eyebrow { color:#d9b96f;font-size:11px;letter-spacing:.28em;text-transform:uppercase;font-weight:700; }
+    .hero h1 { font-size:clamp(42px,8vw,88px);line-height:.98;letter-spacing:-.055em;margin:22px auto 20px;max-width:850px;font-weight:800; }
+    .hero h1 span { color:#e3c47c;text-shadow:0 0 40px #d5ad5930; }
+    .hero p { max-width:600px;margin:0 auto;color:#aebdc6;font-size:clamp(14px,2.2vw,18px);line-height:1.7; }
+    .land-actions { display:flex;justify-content:center;gap:12px;flex-wrap:wrap;margin-top:30px; }
+    .land-btn { border:1px solid #d7b96f;background:linear-gradient(135deg,#e5c77f,#b18b42);color:#111820;border-radius:12px;padding:15px 24px;font-weight:800;letter-spacing:.03em;font-size:14px;cursor:pointer;box-shadow:0 8px 30px #d5b36620; }
+    .land-btn.secondary { background:#ffffff08;color:#e9edf0;border-color:#ffffff28;box-shadow:none; }
+    .land-stats { display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;max-width:760px;width:100%;margin:38px auto 0; }
+    .stat-card { text-align:left;border:1px solid #ffffff17;background:linear-gradient(145deg,#ffffff0c,#ffffff04);border-radius:16px;padding:18px 20px;backdrop-filter:blur(8px); }
+    .stat-number { font-size:clamp(24px,4vw,36px);font-weight:800;letter-spacing:-.04em;color:#fff; }
+    .stat-label { color:#95a6b0;font-size:11px;text-transform:uppercase;letter-spacing:.12em;margin-top:7px; }
+    .land-features { display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-top:42px;text-align:left; }
+    .feature { padding:18px;border-top:1px solid #d8b76b55;color:#aab7c0;font-size:12px;line-height:1.6; }
+    .feature strong { display:block;color:#f2ead7;font-size:14px;margin-bottom:7px; }
+    .land-foot { text-align:center;color:#60717c;font-size:10px;letter-spacing:.12em;margin-top:42px; }
+    @media(max-width:600px) { .land-wrap{padding:18px 16px 28px}.hero{padding:54px 0 26px}.hero h1{font-size:clamp(43px,13vw,62px)}.hero p{font-size:14px}.land-stats{gap:8px;margin-top:30px}.stat-card{padding:14px 10px;border-radius:12px}.stat-label{font-size:9px;letter-spacing:.06em}.land-features{grid-template-columns:1fr;gap:4px;margin-top:26px}.feature{padding:14px 10px}.land-btn{width:100%;padding:16px}.land-actions{gap:9px}.brand{font-size:11px}.server-pill{font-size:9px;padding:7px 9px} }
+    #game-container, #ui-root { touch-action: manipulation; }
+    canvas { max-width:100%; }
   </style>
 </head>
 <body>
+  <section id="landing" aria-label="RealmForge welcome page">
+    <div class="land-wrap">
+      <header class="land-nav">
+        <div class="brand"><div class="brand-mark">⚔</div><span>REALMFORGE</span></div>
+        <div class="server-pill" id="server-status">● CONNECTING TO REALM</div>
+      </header>
+      <main class="hero">
+        <div class="eyebrow">A living world awaits</div>
+        <h1>Forge your <span>legend.</span></h1>
+        <p>Explore a vast fantasy world, hunt dangerous creatures, discover rare loot and build your legacy alongside other adventurers.</p>
+        <div class="land-actions">
+          <button class="land-btn" id="enter-realm">ENTER THE REALM&nbsp; →</button>
+          <button class="land-btn secondary" id="learn-realm">DISCOVER THE WORLD</button>
+        </div>
+        <div class="land-stats">
+          <div class="stat-card"><div class="stat-number" id="online-count">—</div><div class="stat-label">Players online</div></div>
+          <div class="stat-card"><div class="stat-number" id="registered-count">—</div><div class="stat-label">Accounts registered*</div></div>
+          <div class="stat-card"><div class="stat-number">24/7</div><div class="stat-label">Your adventure</div></div>
+        </div>
+      </main>
+      <section class="land-features" id="world-features">
+        <div class="feature"><strong>✦ Explore the unknown</strong>Travel through a growing world full of regions, enemies and secrets to uncover.</div>
+        <div class="feature"><strong>⚔ Fight for glory</strong>Master your class, defeat monsters and collect powerful equipment.</div>
+        <div class="feature"><strong>♜ Adventure together</strong>Meet other players in a shared online fantasy realm.</div>
+      </section>
+      <footer class="land-foot">REALMFORGE · YOUR STORY STARTS HERE · *LIVE SERVER COUNT</footer>
+    </div>
+  </section>
   <div id="game-container"></div>
   <div id="ui-root"></div>
+  <script>
+    const API = 'https://realmforge-server.onrender.com';
+    async function refreshRealmStats() {
+      const status = document.getElementById('server-status');
+      try {
+        const response = await fetch(API + '/stats', { cache: 'no-store' });
+        if (!response.ok) throw new Error('stats unavailable');
+        const stats = await response.json();
+        document.getElementById('online-count').textContent = Number(stats.online || 0).toLocaleString();
+        document.getElementById('registered-count').textContent = Number(stats.registered || 0).toLocaleString();
+        status.textContent = '● REALM ONLINE';
+        status.style.color = '#9ee2bf';
+      } catch (_) {
+        status.textContent = '● REALM WAKING UP';
+        status.style.color = '#e3c47c';
+        document.getElementById('online-count').textContent = '—';
+        document.getElementById('registered-count').textContent = '—';
+      }
+    }
+    refreshRealmStats();
+    setInterval(refreshRealmStats, 20000);
+    document.getElementById('enter-realm').addEventListener('click', () => {
+      document.getElementById('landing').style.display = 'none';
+      window.dispatchEvent(new Event('resize'));
+    });
+    document.getElementById('learn-realm').addEventListener('click', () => {
+      document.getElementById('world-features').scrollIntoView({behavior:'smooth',block:'center'});
+    });
+  </script>
   <script type="module" src="/src/main.ts"></script>
 </body>
 </html>
