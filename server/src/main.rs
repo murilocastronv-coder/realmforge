@@ -20,6 +20,7 @@ use serde_json::json;
 use tokio::sync::{broadcast, mpsc};
 use tracing::{info, warn};
 use uuid::Uuid;
+use sqlx::PgPool;
 
 use crate::enemy::{generate_enemy, update_enemy_ai, compute_pack_aggro};
 use crate::protocol::*;
@@ -61,6 +62,7 @@ fn nearby_cells_range(x: f64, y: f64, range: f64) -> Vec<(i32, i32)> {
 // ─── Server State ────────────────────────────────────────────
 
 struct AppState {
+    db: PgPool,
     /// All connected players (id -> player data)
     players: DashMap<Uuid, PlayerData>,
     /// WebSocket senders for each player
@@ -110,9 +112,10 @@ struct AppState {
 }
 
 impl AppState {
-    fn new() -> Self {
+    fn new(db: PgPool) -> Self {
         let (broadcast_tx, _) = broadcast::channel(1024);
         Self {
+            db,
             players: DashMap::new(),
             senders: DashMap::new(),
             accounts: DashMap::new(),
@@ -202,7 +205,19 @@ async fn main() {
         .with_env_filter("realmforge_server=info,tower_http=info")
         .init();
 
-    let state = Arc::new(AppState::new());
+    let database_url = std::env::var("DATABASE_URL")
+        .expect("DATABASE_URL must be configured on Render");
+    let db = PgPool::connect(&database_url).await
+        .expect("Could not connect to PostgreSQL");
+    sqlx::query("CREATE TABLE IF NOT EXISTS accounts (username TEXT PRIMARY KEY, password TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())")
+        .execute(&db).await.expect("Could not create accounts table");
+    let stored_accounts = sqlx::query_as::<_, (String, String)>("SELECT username, password FROM accounts")
+        .fetch_all(&db).await.expect("Could not load accounts from PostgreSQL");
+    let state = Arc::new(AppState::new(db));
+    for (username, password) in stored_accounts {
+        state.accounts.insert(username, password);
+    }
+    info!("Loaded {} accounts from PostgreSQL", state.accounts.len());
 
     // Start game loop
     let game_state = state.clone();
@@ -611,41 +626,59 @@ async fn handle_auth(
         return;
     }
 
-    if auth.is_register {
-        if state.accounts.contains_key(&auth.username) {
-            let result = AuthResult {
-                success: false,
-                player_id: None,
-                error: Some("Username already exists".into()),
-            };
-            let msg = json!({ "type": MSG_AUTH_RESULT, "payload": result }).to_string();
-            let _ = sender.send(msg);
+    let existing_password = match sqlx::query_scalar::<_, String>(
+        "SELECT password FROM accounts WHERE username = $1"
+    ).bind(&auth.username).fetch_optional(&state.db).await {
+        Ok(value) => value,
+        Err(err) => {
+            warn!("PostgreSQL account lookup failed: {}", err);
+            let result = AuthResult { success: false, player_id: None, error: Some("Database unavailable. Please try again.".into()) };
+            let _ = sender.send(json!({ "type": MSG_AUTH_RESULT, "payload": result }).to_string());
             return;
         }
-        state
-            .accounts
-            .insert(auth.username.clone(), auth.password.clone());
-        info!("New account registered: {}", auth.username);
+    };
+
+    if auth.is_register {
+        if existing_password.is_some() {
+            let result = AuthResult { success: false, player_id: None, error: Some("Username already exists".into()) };
+            let _ = sender.send(json!({ "type": MSG_AUTH_RESULT, "payload": result }).to_string());
+            return;
+        }
+        if let Err(err) = sqlx::query("INSERT INTO accounts (username, password) VALUES ($1, $2)")
+            .bind(&auth.username).bind(&auth.password).execute(&state.db).await {
+            warn!("PostgreSQL account registration failed: {}", err);
+            let result = AuthResult { success: false, player_id: None, error: Some("Could not create account. Please try again.".into()) };
+            let _ = sender.send(json!({ "type": MSG_AUTH_RESULT, "payload": result }).to_string());
+            return;
+        }
+        state.accounts.insert(auth.username.clone(), auth.password.clone());
+        info!("New PostgreSQL account registered: {}", auth.username);
     } else {
-        // Login check
-        match state.accounts.get(&auth.username) {
-            Some(pass) if *pass == auth.password => {}
+        match existing_password {
+            Some(pass) if pass == auth.password => {}
             Some(_) => {
-                let result = AuthResult {
-                    success: false,
-                    player_id: None,
-                    error: Some("Invalid password".into()),
-                };
-                let msg = json!({ "type": MSG_AUTH_RESULT, "payload": result }).to_string();
-                let _ = sender.send(msg);
+                let result = AuthResult { success: false, player_id: None, error: Some("Invalid password".into()) };
+                let _ = sender.send(json!({ "type": MSG_AUTH_RESULT, "payload": result }).to_string());
                 return;
             }
             None => {
-                // Auto-register if account doesn't exist
-                state
-                    .accounts
-                    .insert(auth.username.clone(), auth.password.clone());
-                info!("Auto-registered: {}", auth.username);
+                // Keep the game's existing first-login auto-registration behavior, but persist it.
+                if let Err(err) = sqlx::query("INSERT INTO accounts (username, password) VALUES ($1, $2) ON CONFLICT (username) DO NOTHING")
+                    .bind(&auth.username).bind(&auth.password).execute(&state.db).await {
+                    warn!("PostgreSQL auto-registration failed: {}", err);
+                    let result = AuthResult { success: false, player_id: None, error: Some("Database unavailable. Please try again.".into()) };
+                    let _ = sender.send(json!({ "type": MSG_AUTH_RESULT, "payload": result }).to_string());
+                    return;
+                }
+                let password_now = sqlx::query_scalar::<_, String>("SELECT password FROM accounts WHERE username = $1")
+                    .bind(&auth.username).fetch_optional(&state.db).await.ok().flatten();
+                if password_now.as_deref() != Some(auth.password.as_str()) {
+                    let result = AuthResult { success: false, player_id: None, error: Some("Invalid password".into()) };
+                    let _ = sender.send(json!({ "type": MSG_AUTH_RESULT, "payload": result }).to_string());
+                    return;
+                }
+                state.accounts.insert(auth.username.clone(), auth.password.clone());
+                info!("Auto-registered PostgreSQL account: {}", auth.username);
             }
         }
     }
