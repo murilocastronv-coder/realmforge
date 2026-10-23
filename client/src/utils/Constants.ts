@@ -1,5 +1,5 @@
 // Game constants
-export const SERVER_URL: string = import.meta.env.VITE_SERVER_URL || `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.hostname}:8080/ws`;
+export const SERVER_URL: string = (import.meta as any).env?.VITE_SERVER_URL || `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.hostname}:8080/ws`;
 export const TICK_RATE = 20; // Server ticks per second
 export const TICK_MS = 1000 / TICK_RATE;
 
