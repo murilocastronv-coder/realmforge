@@ -209,9 +209,9 @@ async fn main() {
         .expect("DATABASE_URL must be configured on Render");
     let db = PgPool::connect(&database_url).await
         .expect("Could not connect to PostgreSQL");
-    sqlx::query("CREATE TABLE IF NOT EXISTS accounts (username TEXT PRIMARY KEY, password TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())")
+    sqlx::query("CREATE TABLE IF NOT EXISTS realmforge_accounts (username TEXT PRIMARY KEY, password TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())")
         .execute(&db).await.expect("Could not create accounts table");
-    let stored_accounts = sqlx::query_as::<_, (String, String)>("SELECT username, password FROM accounts")
+    let stored_accounts = sqlx::query_as::<_, (String, String)>("SELECT username, password FROM realmforge_accounts")
         .fetch_all(&db).await.expect("Could not load accounts from PostgreSQL");
     let state = Arc::new(AppState::new(db));
     for (username, password) in stored_accounts {
@@ -627,7 +627,7 @@ async fn handle_auth(
     }
 
     let existing_password = match sqlx::query_scalar::<_, String>(
-        "SELECT password FROM accounts WHERE username = $1"
+        "SELECT password FROM realmforge_accounts WHERE username = $1"
     ).bind(&auth.username).fetch_optional(&state.db).await {
         Ok(value) => value,
         Err(err) => {
@@ -644,7 +644,7 @@ async fn handle_auth(
             let _ = sender.send(json!({ "type": MSG_AUTH_RESULT, "payload": result }).to_string());
             return;
         }
-        if let Err(err) = sqlx::query("INSERT INTO accounts (username, password) VALUES ($1, $2)")
+        if let Err(err) = sqlx::query("INSERT INTO realmforge_accounts (username, password) VALUES ($1, $2)")
             .bind(&auth.username).bind(&auth.password).execute(&state.db).await {
             warn!("PostgreSQL account registration failed: {}", err);
             let result = AuthResult { success: false, player_id: None, error: Some("Could not create account. Please try again.".into()) };
